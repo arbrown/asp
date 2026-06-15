@@ -12,7 +12,7 @@ def _client() -> genai.Client:
     return genai.Client(
         vertexai=True,
         project=settings.gcp_project_id,
-        location=settings.gcp_region,
+        location="global",
     )
 
 

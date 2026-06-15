@@ -28,4 +28,4 @@ settings = Settings()
 # Must be set before any agent module is imported — config.py is always first.
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
 os.environ["GOOGLE_CLOUD_PROJECT"] = settings.gcp_project_id
-os.environ["GOOGLE_CLOUD_LOCATION"] = settings.gcp_region
+os.environ["GOOGLE_CLOUD_LOCATION"] = "global"  # newer Gemini models only on global endpoint

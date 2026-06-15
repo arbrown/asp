@@ -42,7 +42,7 @@ spec:
             - name: GOOGLE_CLOUD_PROJECT
               value: "${GCP_PROJECT_ID}"
             - name: GOOGLE_CLOUD_LOCATION
-              value: "${GCP_REGION}"
+              value: "global"
           resources:
             requests:
               cpu: "500m"
