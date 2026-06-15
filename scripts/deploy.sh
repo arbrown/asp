@@ -31,12 +31,12 @@ echo "==> Authenticating Docker with Artifact Registry..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
 echo "==> Building backend image..."
-docker build --platform linux/amd64 -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"
-docker push "${REGISTRY}/backend:latest"
+docker buildx build --platform linux/amd64 --push \
+  -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"
 
 echo "==> Building frontend image..."
-docker build --platform linux/amd64 -f "${ROOT}/Dockerfile.frontend" -t "${REGISTRY}/frontend:latest" "${ROOT}"
-docker push "${REGISTRY}/frontend:latest"
+docker buildx build --platform linux/amd64 --push \
+  -f "${ROOT}/Dockerfile.frontend" -t "${REGISTRY}/frontend:latest" "${ROOT}"
 
 echo "==> Patching K8s manifests..."
 TMP=$(mktemp -d)
