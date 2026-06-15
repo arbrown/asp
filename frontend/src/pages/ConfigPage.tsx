@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { createSession, type SessionConfig } from "../lib/api";
+import { createSession, listSessions, type SessionConfig, type SessionSummary } from "../lib/api";
 
 const AGE_OPTIONS = [
   { value: "4-5", label: "Ages 4–5 (Pre-K)" },
@@ -8,10 +8,23 @@ const AGE_OPTIONS = [
   { value: "9-12", label: "Ages 9–12 (Grade 3–5)" },
 ];
 
+function sessionLabel(s: SessionSummary): string {
+  const cfg = s.config;
+  const title = cfg?.source?.title || cfg?.source?.author || "Untitled";
+  const age = cfg?.target_age ?? "?";
+  const pages = cfg?.page_count ?? "?";
+  return `${title} — ${age}, ${pages} pages (${s.current_stage})`;
+}
+
 export default function ConfigPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [pastSessions, setPastSessions] = useState<SessionSummary[]>([]);
+
+  useEffect(() => {
+    listSessions().then(setPastSessions).catch(() => {});
+  }, []);
 
   const [form, setForm] = useState<SessionConfig>({
     source: { gutenberg_url: "", title: "", author: "" },
@@ -56,6 +69,33 @@ export default function ConfigPage() {
   return (
     <div className="max-w-2xl mx-auto">
       <h1 className="text-3xl font-serif font-bold text-sepia-900 mb-8">New Storybook</h1>
+
+      {pastSessions.length > 0 && (
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-sepia-900 mb-1">Load from previous run</label>
+          <select
+            className={inputCls}
+            defaultValue=""
+            onChange={(e) => {
+              const s = pastSessions.find((x) => x.session_id === e.target.value);
+              if (s?.config) setForm({
+                source: { gutenberg_url: "", title: "", author: "", ...s.config.source },
+                target_age: s.config.target_age ?? "4-5",
+                page_count: s.config.page_count ?? 12,
+                language: s.config.language ?? "en",
+                text_spec: s.config.text_spec ?? "",
+                image_spec: s.config.image_spec ?? "",
+                custom_instructions: s.config.custom_instructions ?? "",
+              });
+            }}
+          >
+            <option value="" disabled>Choose a past run…</option>
+            {pastSessions.map((s) => (
+              <option key={s.session_id} value={s.session_id}>{sessionLabel(s)}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-8">
 

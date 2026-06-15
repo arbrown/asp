@@ -100,6 +100,7 @@ async def get_session(session_id: str) -> SessionResponse:
         session_id=session_id,
         current_stage=state.current_stage,
         progress_pct=state.progress_pct,
+        config=state.config,
         pdf_signed_url=signed_url,
         errors=state.errors,
     )
@@ -112,6 +113,7 @@ async def list_sessions() -> list[SessionResponse]:
             session_id=sid,
             current_stage=s.current_stage,
             progress_pct=s.progress_pct,
+            config=s.config,
             errors=s.errors,
         )
         for sid, s in _sessions.items()

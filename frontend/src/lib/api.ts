@@ -20,6 +20,7 @@ export interface SessionSummary {
   session_id: string;
   current_stage: string;
   progress_pct: number;
+  config?: SessionConfig;
   pdf_signed_url?: string;
   errors: string[];
 }

@@ -15,6 +15,7 @@ class SessionResponse(BaseModel):
     session_id: str
     current_stage: str
     progress_pct: int
+    config: Optional[SessionConfig] = None
     pdf_signed_url: Optional[str] = None
     errors: list[str] = []
 
