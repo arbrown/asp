@@ -31,11 +31,11 @@ echo "==> Authenticating Docker with Artifact Registry..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
 echo "==> Building backend image..."
-docker build -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"
+docker build --platform linux/amd64 -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"
 docker push "${REGISTRY}/backend:latest"
 
 echo "==> Building frontend image..."
-docker build -f "${ROOT}/Dockerfile.frontend" -t "${REGISTRY}/frontend:latest" "${ROOT}"
+docker build --platform linux/amd64 -f "${ROOT}/Dockerfile.frontend" -t "${REGISTRY}/frontend:latest" "${ROOT}"
 docker push "${REGISTRY}/frontend:latest"
 
 echo "==> Patching K8s manifests..."
