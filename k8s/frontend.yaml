@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: REGION-docker.pkg.dev/PROJECT_ID/storybook-images/frontend:latest
+          image: ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/storybook-images/frontend:latest
           ports:
             - containerPort: 80
           resources:
