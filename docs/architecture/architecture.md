@@ -366,7 +366,13 @@ sequenceDiagram
 | Custom constraints | Free-form `text_spec` + `image_spec` fields; LLM evaluates — no hardcoded rules |
 | Image consistency | Character Bible Agent (runs once) + page-1 style anchor in every validation call |
 | Art style input | Free-form `image_spec` string — no preset dropdown |
+| Retry limits | 3 retries for text validation; 2 retries for image validation |
+| GCP region | `us-central1` (broadest Vertex AI model availability) |
+| GKE cluster type | Autopilot (simpler node management for personal project) |
+| Python version | 3.12 |
+| Terraform state | Local bootstrap → migrate to GCS backend after first apply |
+| Terraform inputs | `project_id` variable required; all asset names human-readable; GCS bucket name = `storybook-artifacts-{random_suffix}` |
 
 ## Open Questions
 
-- [ ] **Retry limits**: How many text/image validation retries before surfacing an error to the user? (Suggest: 3 for text, 2 for images)
+_None — ready to implement._
