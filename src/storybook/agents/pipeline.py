@@ -291,15 +291,19 @@ async def _generate_with_retries(
         if attempt <= settings.image_max_retries:
             await progress_queue.put({
                 "stage": "image_retry",
+                "pct": 0,
                 "page": page_number,
                 "attempt": attempt,
                 "reason": result[:200],
             })
-            # Pick up revised prompt written to state by reject_image tool if present
-            if "revised_prompt" in result:
-                import re
-                if m := re.search(r'"revised_prompt":\s*"(.+?)"', result, re.DOTALL):
-                    current_prompt = m.group(1)
+            # Pick up revised prompt from ADK session state (written by reject_image tool)
+            session = await validator_runner.session_service.get_session(
+                app_name=validator_runner.app_name,
+                user_id="pipeline",
+                session_id=f"{session_id}-imgval-{page_number}-{attempt}",
+            )
+            if session and session.state.get("revised_image_prompt"):
+                current_prompt = session.state["revised_image_prompt"]
 
         log.warning("Image validation attempt %d failed for page %d", attempt, page_number)
 

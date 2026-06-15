@@ -35,7 +35,8 @@ def generate_image(prompt: str) -> bytes:
         ),
     )
 
-    for part in response.candidates[0].content.parts:
+    parts = (response.candidates or [{}])[0].content.parts if response.candidates else None
+    for part in parts or []:
         if part.inline_data and part.inline_data.mime_type.startswith("image/"):
             return part.inline_data.data
 
