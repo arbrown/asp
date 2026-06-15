@@ -39,3 +39,4 @@ infra/terraform/.terraform.lock.hcl
 *.png
 *.jpg
 *.jpeg
+
