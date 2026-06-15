@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 # Build and push both container images, then apply K8s manifests.
-# Usage: ./scripts/deploy.sh <PROJECT_ID> <REGION> <ARTIFACTS_BUCKET>
+# Reads GCP_PROJECT_ID, GCP_REGION, GCS_ARTIFACTS_BUCKET from .env by default.
+# Usage: ./scripts/deploy.sh [project_id] [region] [artifacts_bucket]
 
 set -euo pipefail
 
-PROJECT_ID="${1:?Usage: $0 <project_id> <region> <artifacts_bucket>}"
-REGION="${2:-us-central1}"
-ARTIFACTS_BUCKET="${3:?provide artifacts bucket name}"
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Load .env if present
+if [[ -f "${ROOT}/.env" ]]; then
+  set -o allexport
+  source "${ROOT}/.env"
+  set +o allexport
+fi
+
+# CLI args override .env values
+PROJECT_ID="${1:-${GCP_PROJECT_ID:?GCP_PROJECT_ID not set in .env or args}}"
+REGION="${2:-${GCP_REGION:-us-central1}}"
+ARTIFACTS_BUCKET="${3:-${GCS_ARTIFACTS_BUCKET:?GCS_ARTIFACTS_BUCKET not set in .env or args}}"
 
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/storybook-images"
-ROOT="$(git rev-parse --show-toplevel)"
+
+echo "==> Project:  ${PROJECT_ID}"
+echo "==> Region:   ${REGION}"
+echo "==> Bucket:   ${ARTIFACTS_BUCKET}"
+echo "==> Registry: ${REGISTRY}"
+echo ""
 
 echo "==> Authenticating Docker with Artifact Registry..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
