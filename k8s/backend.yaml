@@ -37,6 +37,12 @@ spec:
               value: "${GCP_REGION}"
             - name: GCS_ARTIFACTS_BUCKET
               value: "${GCS_ARTIFACTS_BUCKET}"
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "1"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "${GCP_PROJECT_ID}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "${GCP_REGION}"
           resources:
             requests:
               cpu: "500m"

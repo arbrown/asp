@@ -1,3 +1,5 @@
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,3 +23,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Direct google-genai (and ADK) to use Vertex AI instead of the Gemini API.
+# Must be set before any agent module is imported — config.py is always first.
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
+os.environ["GOOGLE_CLOUD_PROJECT"] = settings.gcp_project_id
+os.environ["GOOGLE_CLOUD_LOCATION"] = settings.gcp_region
