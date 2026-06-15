@@ -35,9 +35,9 @@ graph TD
     end
 
     subgraph VertexAI ["Vertex AI / Gemini Enterprise Agent Platform"]
-        Gemini25Pro["gemini-2.5-pro\n(complex text tasks)"]
-        Gemini25Flash["gemini-2.5-flash\n(fast text + vision)"]
-        Imagen4["imagen-4.0-generate-001\n(image generation)"]
+        Gemini31Pro["gemini-3.1-pro-preview\n(complex text tasks)"]
+        Gemini35Flash["gemini-3.5-flash\n(fast text + vision)"]
+        NanoBanana2["gemini-3.1-flash-image\n(Nano Banana 2 — image generation)"]
     end
 
     ReactUI -->|"POST /storybook\n+ SSE progress stream"| API
@@ -67,11 +67,11 @@ graph TD
     PDF -->|"signed URL"| API
     API -->|"SSE: done + url"| ReactUI
 
-    Adapt <-->|"API"| Gemini25Pro
-    TextVal <-->|"API"| Gemini25Flash
-    IllPrompt <-->|"API"| Gemini25Flash
-    ImgVal <-->|"API"| Gemini25Flash
-    ImgGen <-->|"API"| Imagen4
+    Adapt <-->|"API"| Gemini31Pro
+    TextVal <-->|"API"| Gemini35Flash
+    IllPrompt <-->|"API"| Gemini35Flash
+    ImgVal <-->|"API"| Gemini35Flash
+    ImgGen <-->|"API"| NanoBanana2
 ```
 
 ---
@@ -81,13 +81,13 @@ graph TD
 | Agent | Role | Model |
 |---|---|---|
 | **Orchestrator** | Runs the full pipeline; holds session context; emits SSE progress events | ADK `SequentialAgent` |
-| **Literature Fetcher** | Accepts Gutenberg URL or search query; downloads and strips boilerplate | HTTP tool + GCS |
-| **Story Adapter** | Rewrites source text for the target age group; respects user's custom instructions | `gemini-2.5-pro` |
-| **Text Validator** | Checks adapted text: reading level, age-appropriateness, completeness; sends feedback to Adapter if retry needed | `gemini-2.5-flash` |
+| **Literature Fetcher** | Given a title/author or URL, uses Gutenberg search tool or fetches directly — agent decides which is more appropriate; strips boilerplate | HTTP tool + GCS |
+| **Story Adapter** | Rewrites source text for the target age group; respects user's custom instructions | `gemini-3.1-pro-preview` |
+| **Text Validator** | Checks adapted text: reading level, age-appropriateness, completeness; sends feedback to Adapter if retry needed | `gemini-3.5-flash` |
 | **Page Splitter** | Segments adapted story into pages using word-count budget derived from age group | deterministic |
-| **Illustration Prompter** | Writes a rich, style-consistent image prompt for each page; maintains character/world continuity | `gemini-2.5-flash` |
-| **Image Generator** | Calls Imagen 4.0 to produce one illustration per page | `imagen-4.0-generate-001` |
-| **Image Validator** | Uses Gemini vision to check each image: style consistency, content safety, match to page text; sends revised prompt back if needed | `gemini-2.5-flash` |
+| **Illustration Prompter** | Writes a rich, style-consistent image prompt for each page; maintains character/world continuity | `gemini-3.5-flash` |
+| **Image Generator** | Calls Nano Banana 2 to produce one illustration per page | `gemini-3.1-flash-image` (Nano Banana 2) |
+| **Image Validator** | Uses Gemini vision to check each image: style consistency, content safety, match to page text; sends revised prompt back if needed | `gemini-3.5-flash` |
 | **PDF Compositor** | Combines page text + images into a formatted PDF storybook | `weasyprint` |
 
 ---
@@ -230,9 +230,9 @@ gs://storybook-artifacts-{project_id}/
 | Concern | Choice | Notes |
 |---|---|---|
 | Agent framework | Google ADK (Python) | Single process, SequentialAgent + ParallelAgent |
-| Complex text tasks | `gemini-2.5-pro` | Story adaptation |
-| Fast text + vision | `gemini-2.5-flash` | Validation, prompts |
-| Image generation | `imagen-4.0-generate-001` | Standard quality; `imagen-4.0-ultra-generate-001` for higher fidelity |
+| Complex text tasks | `gemini-3.1-pro-preview` | Story adaptation (highest capability) |
+| Fast text + vision | `gemini-3.5-flash` | Validation, prompts, vision checks |
+| Image generation | `gemini-3.1-flash-image` | Nano Banana 2 (latest fast image model); `gemini-3-pro-image` (Nano Banana Pro) for higher fidelity |
 | Frontend | React 19 + Vite + Tailwind | Separate GKE service |
 | Real-time updates | SSE | Server → client progress stream |
 | Serving | GKE | Three services: ui, api, agent |
@@ -261,22 +261,22 @@ sequenceDiagram
     UI->>API: GET /sessions/{id}/stream (SSE)
 
     Agent->>GCS: save config.json
-    Agent->>Vertex: fetch Gutenberg text
+    Agent->>Vertex: Literature Fetcher — URL given? fetch directly; title only? Gutenberg search tool
     Agent->>GCS: save original/source_text.txt
     API-->>UI: SSE: {stage: fetching, pct: 10}
 
-    Agent->>Vertex: Gemini 2.5 Pro — adapt for age 4-5
-    Agent->>Vertex: Gemini 2.5 Flash — validate text
+    Agent->>Vertex: gemini-3.1-pro-preview — adapt for age 4-5
+    Agent->>Vertex: gemini-3.5-flash — validate text
     API-->>UI: SSE: {stage: adapting_text, pct: 30}
 
     Agent->>GCS: save adapted/story.json + pages/
     API-->>UI: SSE: {stage: splitting_pages, pct: 40}
 
     loop For each page (12 pages)
-        Agent->>Vertex: Gemini 2.5 Flash — illustration prompt
+        Agent->>Vertex: gemini-3.5-flash — illustration prompt
         Agent->>GCS: save prompts/page_N_prompt.txt
-        Agent->>Vertex: Imagen 4.0 — generate image
-        Agent->>Vertex: Gemini 2.5 Flash (vision) — validate image
+        Agent->>Vertex: gemini-3.1-flash-image (Nano Banana 2) — generate image
+        Agent->>Vertex: gemini-3.5-flash (vision) — validate image
         Agent->>GCS: save images/page_N.png
         API-->>UI: SSE: {stage: generating_image, page: N, pct: ...}
     end
@@ -289,11 +289,17 @@ sequenceDiagram
 
 ---
 
+## Resolved Decisions
+
+| Decision | Choice |
+|---|---|
+| Pod lifecycle | Single pod — personal project, one user |
+| Gutenberg source | Agent decides: URL provided → direct fetch; title/author only → Gutenberg search tool |
+| Auth | Anonymous — no login required |
+| Image model | `gemini-3.1-flash-image` (Nano Banana 2); swap to `gemini-3-pro-image` (Nano Banana Pro) for higher fidelity |
+| Text models | `gemini-3.1-pro-preview` for adaptation; `gemini-3.5-flash` for everything else |
+
 ## Open Questions
 
-- [ ] **Imagen model string**: Confirm exact model ID for "Nano Banana" — using `imagen-4.0-generate-001` until clarified
-- [ ] **Agent pod lifecycle**: One pod per session (fast, expensive) or a queue with N workers (slower, cheaper)?
 - [ ] **Retry policy**: Max retries for text/image validation before surfacing error to user?
-- [ ] **Art style presets**: Curated list (watercolor, gouache, pencil sketch, flat vector, linocut) or free-form?
-- [ ] **Gutenberg search**: Build a search UI backed by the Gutenberg API, or paste-URL-only MVP?
-- [ ] **Auth**: Anonymous MVP or require Google Sign-In to save session history?
+- [ ] **Art style presets**: Curated list (watercolor, gouache, pencil sketch, flat vector, linocut) or free-form string?
