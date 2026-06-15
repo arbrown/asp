@@ -111,10 +111,19 @@ async def run_pipeline(
     if cfg.source.gutenberg_url:
         state.source_text = await asyncio.to_thread(fetch_gutenberg_url, cfg.source.gutenberg_url)
     else:
-        query = " ".join(filter(None, [cfg.source.title, cfg.source.author]))
-        results = await asyncio.to_thread(search_gutenberg, query)
+        # Try progressively looser queries — combined rarely works on gutendex
+        candidates = [
+            cfg.source.title,
+            cfg.source.author,
+            cfg.source.title.split()[0] if cfg.source.title else None,
+        ]
+        results = []
+        for q in filter(None, candidates):
+            results = await asyncio.to_thread(search_gutenberg, q)
+            if results:
+                break
         if not results:
-            raise RuntimeError(f"No Gutenberg results found for: {query!r}")
+            raise RuntimeError(f"No Gutenberg results found for: {cfg.source.title!r} / {cfg.source.author!r}")
         state.source_text = await asyncio.to_thread(fetch_gutenberg_url, results[0]["download_url"])
     gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
     await emit("fetching", 10, message="Source text fetched")
