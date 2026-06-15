@@ -117,7 +117,7 @@ export default function ConfigPage() {
               <input
                 type="number"
                 min={6}
-                max={24}
+                max={64}
                 value={form.page_count}
                 onChange={(e) => set("page_count", Number(e.target.value))}
                 className={inputCls}

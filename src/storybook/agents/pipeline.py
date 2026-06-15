@@ -68,6 +68,11 @@ def _make_runner(agent: LlmAgent | LoopAgent) -> Runner:
 
 async def _run_agent(runner: Runner, session_id: str, message: str) -> str:
     """Run an ADK agent and return the final text response."""
+    await runner.session_service.create_session(
+        app_name=runner.app_name,
+        user_id="pipeline",
+        session_id=session_id,
+    )
     final = ""
     async for event in runner.run_async(
         session_id=session_id,
