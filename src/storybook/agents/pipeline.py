@@ -66,8 +66,13 @@ def _make_runner(agent: LlmAgent | LoopAgent) -> Runner:
     )
 
 
-async def _run_agent(runner: Runner, session_id: str, message: str) -> str:
-    """Run an ADK agent and return the final text response."""
+async def _run_agent(runner: Runner, session_id: str, message: str, output_key: str | None = None) -> str:
+    """Run an ADK agent and return the final text response.
+
+    If output_key is provided, the return value is read from ADK session state
+    rather than the streamed response — use this when a LoopAgent contains
+    multiple sub-agents whose final responses would otherwise be concatenated.
+    """
     await runner.session_service.create_session(
         app_name=runner.app_name,
         user_id="pipeline",
@@ -82,7 +87,14 @@ async def _run_agent(runner: Runner, session_id: str, message: str) -> str:
         if event.is_final_response() and event.content:
             for part in event.content.parts:
                 if part.text:
-                    final += part.text
+                    final = part.text  # overwrite — keep last event only
+    if output_key:
+        session = await runner.session_service.get_session(
+            app_name=runner.app_name,
+            user_id="pipeline",
+            session_id=session_id,
+        )
+        return (session.state.get(output_key) or final).strip()
     return final.strip()
 
 
@@ -138,6 +150,7 @@ async def run_pipeline(
             "source_text": state.source_text,
             "config": cfg.model_dump(),
         }),
+        output_key="adapted_text",
     )
     gcs.write_json(sid, "adapted", "story.json", data={
         "title": cfg.source.title or "Untitled",
