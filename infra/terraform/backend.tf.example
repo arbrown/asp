@@ -1,0 +1,10 @@
+# After running `terraform apply` for the first time, copy this file to backend.tf
+# and replace TFSTATE_BUCKET_NAME with the value from the `tfstate_bucket` output.
+# Then run `terraform init -migrate-state` to move local state into GCS.
+
+terraform {
+  backend "gcs" {
+    bucket = "TFSTATE_BUCKET_NAME"
+    prefix = "storybook/state"
+  }
+}

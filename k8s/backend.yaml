@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: storybook-backend
+  namespace: default
+  annotations:
+    # Workload Identity — binds to the GCP SA created by Terraform
+    iam.gke.io/gcp-service-account: storybook-backend@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storybook-backend
+  namespace: default
+  labels:
+    app: storybook-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storybook-backend
+  template:
+    metadata:
+      labels:
+        app: storybook-backend
+    spec:
+      serviceAccountName: storybook-backend
+      containers:
+        - name: backend
+          image: REGION-docker.pkg.dev/PROJECT_ID/storybook-images/backend:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GCP_PROJECT_ID
+              value: "PROJECT_ID"
+            - name: GCP_REGION
+              value: "us-central1"
+            - name: GCS_ARTIFACTS_BUCKET
+              value: "ARTIFACTS_BUCKET_NAME"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storybook-backend
+  namespace: default
+spec:
+  selector:
+    app: storybook-backend
+  ports:
+    - port: 80
+      targetPort: 8080
