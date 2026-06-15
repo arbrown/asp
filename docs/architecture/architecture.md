@@ -6,76 +6,196 @@ A multi-agent pipeline that adapts public-domain literature into illustrated chi
 
 ## System Overview
 
+All agents run inside a **single ADK process** (one GKE pod / Cloud Run instance). ADK's `SequentialAgent` and `ParallelAgent` composability handles orchestration in-process — no inter-agent network hops. If the image generation step becomes a scaling bottleneck later, it can be extracted to a separate worker pool, but the pipeline is sequential so splitting now adds ops complexity with no benefit.
+
 ```mermaid
 graph TD
-    User["👤 User / Client"]
-    API["API Gateway\n(Cloud Run or GKE Ingress)"]
-    Orch["🎭 Orchestrator Agent\n(ADK SequentialAgent)"]
+    ReactUI["⚛️ React Frontend\n(separate GKE service)"]
+    API["🔌 API Service\n(FastAPI + SSE streaming)"]
+    Orch["🎭 Orchestrator\n(ADK SequentialAgent)"]
 
-    subgraph Agents ["Agent Pipeline"]
-        Fetch["📚 Literature Fetcher Agent\n(Fetches & validates source text)"]
-        Adapt["✏️ Story Adapter Agent\n(Gemini: rewrites for children)"]
-        Page["📄 Page Splitter Agent\n(Segments story into pages)"]
-        Prompt["🎨 Illustration Prompter Agent\n(Gemini: crafts image prompts)"]
-        Image["🖼️ Image Generator Agent\n(Imagen 3 via Vertex AI)"]
-        PDF["📕 PDF Compositor Agent\n(Assembles final storybook)"]
+    subgraph AgentPipeline ["ADK Agent Pipeline — single process"]
+        Fetch["📚 Literature Fetcher\n(Gutenberg → raw text)"]
+        Adapt["✏️ Story Adapter\n(Gemini 2.5 Pro)"]
+        TextVal["✅ Text Validator\n(Gemini 2.5 Flash)"]
+        PageSplit["📄 Page Splitter\n(deterministic tool)"]
+        IllPrompt["🎨 Illustration Prompter\n(Gemini 2.5 Flash)"]
+        ImgGen["🖼️ Image Generator\n(Imagen 4.0)"]
+        ImgVal["🔍 Image Validator\n(Gemini 2.5 Flash vision)"]
+        PDF["📕 PDF Compositor\n(weasyprint)"]
     end
 
-    subgraph Storage ["GCS Bucket — storybook-artifacts"]
-        direction LR
-        Orig["session/{id}/original/\nsource_text.txt"]
-        Adapted["session/{id}/adapted/\nstory.json"]
-        Pages["session/{id}/pages/\npage_01.txt … page_N.txt"]
-        Prompts["session/{id}/prompts/\npage_01_prompt.txt …"]
-        Images["session/{id}/images/\npage_01.png … page_N.png"]
-        Final["session/{id}/final/\nstorybook.pdf"]
+    subgraph Storage ["GCS — storybook-artifacts"]
+        Orig["original/source_text.txt"]
+        Adapted["adapted/story.json"]
+        Pages["pages/page_N.txt"]
+        Prompts["prompts/page_N_prompt.txt"]
+        Images["images/page_N.png"]
+        Final["final/storybook.pdf"]
     end
 
     subgraph VertexAI ["Vertex AI / Gemini Enterprise Agent Platform"]
-        Gemini["Gemini 2.0 Flash / Pro\n(Text generation)"]
-        Imagen["Imagen 3\n(Image generation)"]
+        Gemini25Pro["gemini-2.5-pro\n(complex text tasks)"]
+        Gemini25Flash["gemini-2.5-flash\n(fast text + vision)"]
+        Imagen4["imagen-4.0-generate-001\n(image generation)"]
     end
 
-    User -->|"POST /storybook {title, author, style}"| API
-    API --> Orch
+    ReactUI -->|"POST /storybook\n+ SSE progress stream"| API
+    API -->|"start_session(config)"| Orch
 
     Orch --> Fetch
-    Fetch -->|"raw text"| Orig
+    Fetch --> Orig
     Fetch --> Adapt
 
-    Adapt -->|"child-friendly prose"| Adapted
-    Adapt --> Page
+    Adapt --> Adapted
+    Adapt --> TextVal
+    TextVal -->|"pass / retry with feedback"| Adapt
 
-    Page -->|"page segments"| Pages
-    Page --> Prompt
+    TextVal --> PageSplit
+    PageSplit --> Pages
+    PageSplit --> IllPrompt
 
-    Prompt -->|"illustration prompts"| Prompts
-    Prompt --> Image
+    IllPrompt --> Prompts
+    IllPrompt --> ImgGen
 
-    Image -->|"page illustrations"| Images
-    Image --> PDF
+    ImgGen --> Images
+    ImgGen --> ImgVal
+    ImgVal -->|"pass / retry with revised prompt"| ImgGen
 
-    PDF -->|"final PDF"| Final
-    PDF -->|"signed URL"| User
+    ImgVal --> PDF
+    PDF --> Final
+    PDF -->|"signed URL"| API
+    API -->|"SSE: done + url"| ReactUI
 
-    Adapt <-->|"Gemini API"| Gemini
-    Prompt <-->|"Gemini API"| Gemini
-    Image <-->|"Imagen API"| Imagen
+    Adapt <-->|"API"| Gemini25Pro
+    TextVal <-->|"API"| Gemini25Flash
+    IllPrompt <-->|"API"| Gemini25Flash
+    ImgVal <-->|"API"| Gemini25Flash
+    ImgGen <-->|"API"| Imagen4
 ```
 
 ---
 
 ## Agent Responsibilities
 
-| Agent | Role | Model / Tool |
+| Agent | Role | Model |
 |---|---|---|
-| **Orchestrator** | Coordinates the full pipeline; passes session context between agents | ADK `SequentialAgent` |
-| **Literature Fetcher** | Accepts a Project Gutenberg URL or title, downloads raw text, strips boilerplate | HTTP tool + GCS write |
-| **Story Adapter** | Rewrites the source text as age-appropriate prose (target reading level configurable) | Gemini 2.0 Flash |
-| **Page Splitter** | Segments the adapted story into discrete pages (word-count budget per page) | Deterministic tool |
-| **Illustration Prompter** | Generates a rich image prompt for each page, consistent style/character descriptions | Gemini 2.0 Flash |
-| **Image Generator** | Calls Imagen 3 to produce one illustration per page | Imagen 3 via Vertex AI |
-| **PDF Compositor** | Combines page text + images into a formatted PDF storybook | Python (`reportlab` or `weasyprint`) |
+| **Orchestrator** | Runs the full pipeline; holds session context; emits SSE progress events | ADK `SequentialAgent` |
+| **Literature Fetcher** | Accepts Gutenberg URL or search query; downloads and strips boilerplate | HTTP tool + GCS |
+| **Story Adapter** | Rewrites source text for the target age group; respects user's custom instructions | `gemini-2.5-pro` |
+| **Text Validator** | Checks adapted text: reading level, age-appropriateness, completeness; sends feedback to Adapter if retry needed | `gemini-2.5-flash` |
+| **Page Splitter** | Segments adapted story into pages using word-count budget derived from age group | deterministic |
+| **Illustration Prompter** | Writes a rich, style-consistent image prompt for each page; maintains character/world continuity | `gemini-2.5-flash` |
+| **Image Generator** | Calls Imagen 4.0 to produce one illustration per page | `imagen-4.0-generate-001` |
+| **Image Validator** | Uses Gemini vision to check each image: style consistency, content safety, match to page text; sends revised prompt back if needed | `gemini-2.5-flash` |
+| **PDF Compositor** | Combines page text + images into a formatted PDF storybook | `weasyprint` |
+
+---
+
+## Session Input Schema
+
+A session is started with a structured config. The user can provide as much or as little as they want — sensible defaults fill the rest.
+
+```json
+{
+  "source": {
+    "gutenberg_url": "https://www.gutenberg.org/ebooks/XXXX",
+    "title": "Eugene Onegin",
+    "author": "Alexander Pushkin"
+  },
+  "target_age": "4-5",
+  "art_style": "watercolor",
+  "page_count": 12,
+  "custom_instructions": "Focus on the friendship themes. Use simple rhyming language.",
+  "language": "en"
+}
+```
+
+**Age group → pipeline parameters mapping:**
+
+| Age Group | Max words/page | Sentence length | Gemini reading level target |
+|---|---|---|---|
+| 4–5 | 20 | 5–7 words | Pre-K / Primer |
+| 6–8 | 50 | 8–12 words | Grade 1–2 |
+| 9–12 | 100 | 12–20 words | Grade 3–5 |
+
+---
+
+## Frontend Architecture
+
+A separate React service — not ADK's built-in debug UI.
+
+```mermaid
+graph LR
+    subgraph Frontend ["React App (GKE service: storybook-ui)"]
+        Home["Home / Search\n(Gutenberg lookup)"]
+        Config["Session Config Form\n(age, style, instructions)"]
+        Progress["Live Progress View\n(SSE stream)"]
+        Viewer["Storybook Viewer\n(page flip, download)"]
+        History["Session History\n(past runs)"]
+    end
+
+    subgraph API ["API Service (GKE service: storybook-api)"]
+        EP1["POST /sessions"]
+        EP2["GET /sessions/{id}/stream (SSE)"]
+        EP3["GET /sessions/{id}"]
+        EP4["GET /sessions"]
+    end
+
+    Home --> Config
+    Config -->|"POST /sessions"| EP1
+    EP1 -->|"session_id"| Progress
+    Progress -->|"GET /sessions/{id}/stream"| EP2
+    EP2 -->|"progress events"| Progress
+    Progress -->|"done"| Viewer
+    Viewer -->|"GET /sessions/{id}"| EP3
+    Home -->|"GET /sessions"| History
+```
+
+**Tech choices for the frontend:**
+
+| Concern | Choice |
+|---|---|
+| Framework | React 19 + TypeScript |
+| Build tool | Vite |
+| Styling | Tailwind CSS |
+| Real-time progress | Server-Sent Events (SSE) — simpler than WebSockets for one-way server push |
+| Page flip animation | `react-pageflip` |
+| State management | Zustand (lightweight) |
+| HTTP client | `@tanstack/react-query` |
+
+**SSE progress event shape:**
+```json
+{ "event": "progress", "stage": "adapting_text", "pct": 30, "message": "Adapting prose for ages 4–5…" }
+{ "event": "progress", "stage": "generating_image", "page": 3, "pct": 65 }
+{ "event": "done", "signed_url": "https://storage.googleapis.com/...", "session_id": "abc123" }
+{ "event": "error", "stage": "image_validation", "message": "Image retry limit exceeded on page 2" }
+```
+
+---
+
+## Deployment Topology
+
+```mermaid
+graph TD
+    Internet["Internet"] --> LB["GKE Ingress / Load Balancer"]
+    LB --> UI["storybook-ui\n(React, nginx)"]
+    LB --> APIGW["storybook-api\n(FastAPI)"]
+    APIGW --> AgentPod["storybook-agent\n(ADK pipeline)"]
+
+    subgraph GCP ["Google Cloud"]
+        AgentPod --> Vertex["Vertex AI\n(Gemini 2.5 + Imagen 4.0)"]
+        AgentPod --> GCS["Cloud Storage\n(session artifacts)"]
+        AgentPod --> SecretMgr["Secret Manager"]
+        AR["Artifact Registry"] --> LB
+        CloudBuild["Cloud Build"] --> AR
+    end
+```
+
+Three GKE services:
+- `storybook-ui` — React app served by nginx, scales to 0 off-hours
+- `storybook-api` — FastAPI, receives requests and manages SSE streams
+- `storybook-agent` — ADK process, one pod per in-flight session (or queue-based)
 
 ---
 
@@ -84,11 +204,12 @@ graph TD
 ```
 gs://storybook-artifacts-{project_id}/
 └── sessions/
-    └── {session_id}/          # UUID generated per run
+    └── {session_id}/
+        ├── config.json              ← full session input
         ├── original/
         │   └── source_text.txt
         ├── adapted/
-        │   └── story.json     # title, author, reading_level, full_text
+        │   └── story.json           ← title, author, adapted_text, metadata
         ├── pages/
         │   ├── page_01.txt
         │   └── page_N.txt
@@ -104,45 +225,21 @@ gs://storybook-artifacts-{project_id}/
 
 ---
 
-## Deployment Topology
+## Technology Summary
 
-```mermaid
-graph LR
-    subgraph GKE ["GKE Cluster (or Cloud Run)"]
-        API2["API Service\n(FastAPI)"]
-        AgentSvc["Agent Runner Service\n(ADK runtime)"]
-    end
-
-    subgraph GCP ["Google Cloud"]
-        GCS["Cloud Storage\n(Artifacts)"]
-        Vertex["Vertex AI\n(Gemini + Imagen)"]
-        SecretMgr["Secret Manager\n(API keys, config)"]
-        AR["Artifact Registry\n(Container images)"]
-        CloudBuild["Cloud Build\n(CI/CD)"]
-    end
-
-    Client["Client"] --> API2
-    API2 --> AgentSvc
-    AgentSvc --> GCS
-    AgentSvc --> Vertex
-    AgentSvc --> SecretMgr
-    CloudBuild --> AR
-    AR --> GKE
-```
-
----
-
-## Technology Choices
-
-| Concern | Choice | Rationale |
+| Concern | Choice | Notes |
 |---|---|---|
-| Agent framework | Google ADK (Python) | Native Vertex AI integration, supports multi-agent orchestration |
-| LLM | Gemini 2.0 Flash / Pro | Cost-efficient for text; Pro for complex adaptation tasks |
-| Image generation | Imagen 3 | Highest quality Google-native image model |
-| Serving | Cloud Run (MVP) → GKE (scale) | Cloud Run for fast iteration; GKE for long-running pipelines |
-| Artifact storage | GCS | Durable, session-scoped, easy signed URL generation |
-| PDF generation | `weasyprint` (HTML→PDF) | CSS-based layout, good typography control |
-| Source texts | Project Gutenberg API | Largest free public-domain library |
+| Agent framework | Google ADK (Python) | Single process, SequentialAgent + ParallelAgent |
+| Complex text tasks | `gemini-2.5-pro` | Story adaptation |
+| Fast text + vision | `gemini-2.5-flash` | Validation, prompts |
+| Image generation | `imagen-4.0-generate-001` | Standard quality; `imagen-4.0-ultra-generate-001` for higher fidelity |
+| Frontend | React 19 + Vite + Tailwind | Separate GKE service |
+| Real-time updates | SSE | Server → client progress stream |
+| Serving | GKE | Three services: ui, api, agent |
+| Artifacts | GCS | Session-scoped folders, signed URLs for delivery |
+| PDF generation | `weasyprint` | HTML/CSS → PDF, good typography |
+| Source texts | Project Gutenberg | Free public-domain library |
+| IaC | Terraform | `infra/terraform/` |
 
 ---
 
@@ -151,38 +248,52 @@ graph LR
 ```mermaid
 sequenceDiagram
     actor User
-    participant API
-    participant Orch as Orchestrator
+    participant UI as React UI
+    participant API as storybook-api
+    participant Agent as ADK Pipeline
     participant GCS
-    participant Gemini
-    participant Imagen
+    participant Vertex as Vertex AI
 
-    User->>API: POST /storybook {title, reading_level, art_style}
-    API->>Orch: start_session(config)
-    Orch->>GCS: create session folder
-    Orch->>Orch: fetch source text (Gutenberg)
-    Orch->>GCS: save original/source_text.txt
-    Orch->>Gemini: adapt text for children
-    Orch->>GCS: save adapted/story.json + pages/
-    loop For each page
-        Orch->>Gemini: generate illustration prompt
-        Orch->>GCS: save prompts/page_N_prompt.txt
-        Orch->>Imagen: generate image
-        Orch->>GCS: save images/page_N.png
+    User->>UI: Fill config form (Eugene Onegin, age 4-5, watercolor)
+    UI->>API: POST /sessions {config}
+    API->>Agent: start_session(config)
+    API-->>UI: 200 {session_id}
+    UI->>API: GET /sessions/{id}/stream (SSE)
+
+    Agent->>GCS: save config.json
+    Agent->>Vertex: fetch Gutenberg text
+    Agent->>GCS: save original/source_text.txt
+    API-->>UI: SSE: {stage: fetching, pct: 10}
+
+    Agent->>Vertex: Gemini 2.5 Pro — adapt for age 4-5
+    Agent->>Vertex: Gemini 2.5 Flash — validate text
+    API-->>UI: SSE: {stage: adapting_text, pct: 30}
+
+    Agent->>GCS: save adapted/story.json + pages/
+    API-->>UI: SSE: {stage: splitting_pages, pct: 40}
+
+    loop For each page (12 pages)
+        Agent->>Vertex: Gemini 2.5 Flash — illustration prompt
+        Agent->>GCS: save prompts/page_N_prompt.txt
+        Agent->>Vertex: Imagen 4.0 — generate image
+        Agent->>Vertex: Gemini 2.5 Flash (vision) — validate image
+        Agent->>GCS: save images/page_N.png
+        API-->>UI: SSE: {stage: generating_image, page: N, pct: ...}
     end
-    Orch->>Orch: compose PDF
-    Orch->>GCS: save final/storybook.pdf
-    Orch->>API: signed_url + session_id
-    API->>User: 200 OK {signed_url, session_id}
+
+    Agent->>Agent: compose PDF (weasyprint)
+    Agent->>GCS: save final/storybook.pdf
+    API-->>UI: SSE: {event: done, signed_url: "..."}
+    UI->>User: Show storybook viewer + download button
 ```
 
 ---
 
-## Open Questions / Decisions Pending
+## Open Questions
 
-- [ ] **Async vs sync API**: Long pipeline (~minutes) — use async job + polling endpoint, or streaming SSE?
-- [ ] **Art style control**: Fixed styles (watercolor, cartoon, pencil sketch) or free-form prompt injection?
-- [ ] **Reading level targeting**: Fixed tiers (ages 4–6, 7–9, 10–12) or Flesch-Kincaid scoring loop?
-- [ ] **Multi-language**: English-only MVP or i18n from the start?
-- [ ] **Source selection UI**: URL paste only, or a built-in Gutenberg search?
-- [ ] **Page count**: Fixed (12 pages standard picture book) or derived from source length?
+- [ ] **Imagen model string**: Confirm exact model ID for "Nano Banana" — using `imagen-4.0-generate-001` until clarified
+- [ ] **Agent pod lifecycle**: One pod per session (fast, expensive) or a queue with N workers (slower, cheaper)?
+- [ ] **Retry policy**: Max retries for text/image validation before surfacing error to user?
+- [ ] **Art style presets**: Curated list (watercolor, gouache, pencil sketch, flat vector, linocut) or free-form?
+- [ ] **Gutenberg search**: Build a search UI backed by the Gutenberg API, or paste-URL-only MVP?
+- [ ] **Auth**: Anonymous MVP or require Google Sign-In to save session history?
