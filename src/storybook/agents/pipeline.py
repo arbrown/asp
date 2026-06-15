@@ -29,7 +29,6 @@ from storybook.agents.character_bible import character_bible_agent
 from storybook.agents.image_generator import generate_image
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
-from storybook.agents.literature_fetcher import literature_fetcher
 from storybook.agents.page_splitter import split_into_pages
 from storybook.agents.pdf_compositor import compose_pdf
 from storybook.agents.story_adapter import story_adapter
@@ -37,6 +36,7 @@ from storybook.agents.text_validator import text_validator
 from storybook.config import settings
 from storybook.models import PipelineState, SessionConfig
 from storybook.tools import gcs
+from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
 
 log = logging.getLogger(__name__)
 
@@ -105,11 +105,17 @@ async def run_pipeline(
     age_params = cfg.age_params
 
     # ── 1. Fetch source text ──────────────────────────────────────────────────
+    # Plain function — no LLM needed, and passing a full book through a model
+    # context just to echo it back causes timeouts.
     await emit("fetching", 5)
-    fetch_runner = _make_runner(literature_fetcher)
-    state.source_text = await _run_agent(
-        fetch_runner, sid, json.dumps({"source": cfg.source.model_dump()})
-    )
+    if cfg.source.gutenberg_url:
+        state.source_text = await asyncio.to_thread(fetch_gutenberg_url, cfg.source.gutenberg_url)
+    else:
+        query = " ".join(filter(None, [cfg.source.title, cfg.source.author]))
+        results = await asyncio.to_thread(search_gutenberg, query)
+        if not results:
+            raise RuntimeError(f"No Gutenberg results found for: {query!r}")
+        state.source_text = await asyncio.to_thread(fetch_gutenberg_url, results[0]["download_url"])
     gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
     await emit("fetching", 10, message="Source text fetched")
 
