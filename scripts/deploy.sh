@@ -51,6 +51,10 @@ done
 echo "==> Applying manifests..."
 kubectl apply -f "${TMP}/"
 
+echo "==> Restarting deployments to pick up new images..."
+kubectl rollout restart deployment/storybook-backend
+kubectl rollout restart deployment/storybook-ui
+
 echo "==> Waiting for rollout..."
 kubectl rollout status deployment/storybook-backend
 kubectl rollout status deployment/storybook-ui
