@@ -65,7 +65,11 @@ async def stream_session(session_id: str) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
         try:
             while True:
-                event = await q.get()
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
                 if event is None:
                     break
                 yield f"data: {json.dumps(event)}\n\n"

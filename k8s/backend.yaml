@@ -68,6 +68,8 @@ kind: Service
 metadata:
   name: storybook-backend
   namespace: default
+  annotations:
+    cloud.google.com/backend-config: '{"default": "storybook-backend-config"}'
 spec:
   selector:
     app: storybook-backend
