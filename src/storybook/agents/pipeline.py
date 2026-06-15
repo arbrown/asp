@@ -236,8 +236,7 @@ async def run_pipeline(
     state.pdf_gcs_uri = gcs.write_bytes(
         sid, "final", "storybook.pdf", data=pdf_bytes, content_type="application/pdf"
     )
-    signed = gcs.signed_url(sid, "final", "storybook.pdf", expiry_minutes=60)
-    await emit("done", 100, signed_url=signed, session_id=sid)
+    await emit("done", 100, session_id=sid)
 
     state.current_stage = "done"
     state.progress_pct = 100

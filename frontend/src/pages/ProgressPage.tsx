@@ -31,7 +31,7 @@ export default function ProgressPage() {
         setEvents((prev) => [...prev, e]);
         setPct(e.pct);
         setStage(e.stage);
-        if (e.stage === "done" && e.signed_url) {
+        if (e.stage === "done") {
           setDone(true);
           setTimeout(() => navigate(`/session/${id}`), 1500);
         }

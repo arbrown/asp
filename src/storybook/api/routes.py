@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from storybook.agents.pipeline import run_pipeline
 from storybook.api.models import CreateSessionRequest, SessionResponse
@@ -92,21 +92,28 @@ async def get_session(session_id: str) -> SessionResponse:
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from storybook.tools import gcs
-    signed_url = None
-    if state.pdf_gcs_uri:
-        try:
-            signed_url = gcs.signed_url(session_id, "final", "storybook.pdf")
-        except Exception:
-            pass
-
     return SessionResponse(
         session_id=session_id,
         current_stage=state.current_stage,
         progress_pct=state.progress_pct,
         config=state.config,
-        pdf_signed_url=signed_url,
+        pdf_signed_url=f"/api/v1/sessions/{session_id}/pdf" if state.pdf_gcs_uri else None,
         errors=state.errors,
+    )
+
+
+@router.get("/sessions/{session_id}/pdf")
+async def download_pdf(session_id: str) -> Response:
+    state = _sessions.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not state.pdf_gcs_uri:
+        raise HTTPException(status_code=404, detail="PDF not ready")
+    data, content_type = gcs.read_blob(session_id, "final", "storybook.pdf")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="storybook-{session_id[:8]}.pdf"'},
     )
 
 

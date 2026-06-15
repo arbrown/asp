@@ -55,13 +55,10 @@ def read_bytes(session_id: str, *path_parts: str) -> bytes:
     return _bucket().blob(key).download_as_bytes()
 
 
-def signed_url(session_id: str, *path_parts: str, expiry_minutes: int = 60) -> str:
-    """Return a short-lived signed URL for direct browser download."""
-    import datetime
+def read_blob(session_id: str, *path_parts: str) -> tuple[bytes, str]:
+    """Return (bytes, content_type) for a GCS object."""
     key = _blob_path(session_id, *path_parts)
     blob = _bucket().blob(key)
-    return blob.generate_signed_url(
-        expiration=datetime.timedelta(minutes=expiry_minutes),
-        method="GET",
-        version="v4",
-    )
+    blob.reload()
+    data = blob.download_as_bytes()
+    return data, blob.content_type or "application/octet-stream"
