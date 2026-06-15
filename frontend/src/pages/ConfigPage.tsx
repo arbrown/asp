@@ -66,9 +66,27 @@ export default function ConfigPage() {
     }
   }
 
+  function fillExample() {
+    setForm({
+      source: { gutenberg_url: "", title: "Eugene Onegin", author: "Alexander Pushkin" },
+      target_age: "4-5",
+      page_count: 12,
+      language: "en",
+      text_spec: "Write in Onegin stanzas. Each stanza is 14 lines of iambic tetrameter with rhyme scheme ABABCCDDEFFEGG. Each page is one complete stanza.",
+      image_spec: "Pen and ink with fine cross-hatching. No color fills. High contrast black and white. 19th century book illustration style.",
+      custom_instructions: "Focus on the Tatiana storyline. Emphasize wonder and nature. Keep the melancholy of the original but make it gentle.",
+    });
+  }
+
   return (
     <div className="max-w-2xl mx-auto">
-      <h1 className="text-3xl font-serif font-bold text-sepia-900 mb-8">New Storybook</h1>
+      <div className="flex items-baseline justify-between mb-8">
+        <h1 className="text-3xl font-serif font-bold text-sepia-900">New Storybook</h1>
+        <button type="button" onClick={fillExample}
+          className="text-sm text-sepia-500 hover:text-sepia-900 underline underline-offset-2 transition-colors">
+          Fill example
+        </button>
+      </div>
 
       {pastSessions.length > 0 && (
         <div className="mb-6">
