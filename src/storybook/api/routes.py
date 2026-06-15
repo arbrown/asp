@@ -12,6 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 from storybook.agents.pipeline import run_pipeline
 from storybook.api.models import CreateSessionRequest, SessionResponse
 from storybook.models import PipelineState
+from storybook.tools import gcs
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,14 +31,27 @@ async def create_session(body: CreateSessionRequest) -> SessionResponse:
     q: asyncio.Queue = asyncio.Queue()
     _sessions[sid] = state
     _queues[sid] = q
-
     _tasks[sid] = asyncio.create_task(_run(sid, state, q))
+
+    await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(state))
 
     return SessionResponse(
         session_id=sid,
         current_stage=state.current_stage,
         progress_pct=state.progress_pct,
+        config=state.config,
     )
+
+
+def _session_meta(state: PipelineState) -> dict:
+    return {
+        "session_id": state.session_id,
+        "config": state.config.model_dump(),
+        "current_stage": state.current_stage,
+        "progress_pct": state.progress_pct,
+        "pdf_gcs_uri": state.pdf_gcs_uri,
+        "errors": state.errors,
+    }
 
 
 async def _run(sid: str, state: PipelineState, q: asyncio.Queue) -> None:
@@ -51,6 +65,7 @@ async def _run(sid: str, state: PipelineState, q: asyncio.Queue) -> None:
         await q.put({"stage": "error", "pct": 0, "message": str(exc)})
     finally:
         await q.put(None)  # sentinel — stream is done
+        await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(_sessions[sid]))
 
 
 @router.get("/sessions/{session_id}/stream")

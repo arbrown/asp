@@ -55,6 +55,24 @@ def read_bytes(session_id: str, *path_parts: str) -> bytes:
     return _bucket().blob(key).download_as_bytes()
 
 
+def save_session_meta(session_id: str, data: dict) -> None:
+    """Persist session metadata so it survives pod restarts."""
+    write_json(session_id, "session.json", data=data)
+
+
+def load_all_session_meta() -> list[dict]:
+    """Scan GCS and return metadata for all known sessions."""
+    bucket = _bucket()
+    results = []
+    for blob in bucket.list_blobs(prefix="sessions/"):
+        if blob.name.endswith("/session.json"):
+            try:
+                results.append(json.loads(blob.download_as_text()))
+            except Exception:
+                pass
+    return results
+
+
 def read_blob(session_id: str, *path_parts: str) -> tuple[bytes, str]:
     """Return (bytes, content_type) for a GCS object."""
     key = _blob_path(session_id, *path_parts)
