@@ -40,12 +40,12 @@ docker buildx build --platform linux/amd64 --push \
 
 echo "==> Patching K8s manifests..."
 TMP=$(mktemp -d)
+export GCP_PROJECT_ID="${PROJECT_ID}"
+export GCP_REGION="${REGION}"
+export GCS_ARTIFACTS_BUCKET="${ARTIFACTS_BUCKET}"
 for f in "${ROOT}/k8s"/*.yaml; do
-  sed \
-    -e "s|PROJECT_ID|${PROJECT_ID}|g" \
-    -e "s|REGION|${REGION}|g" \
-    -e "s|ARTIFACTS_BUCKET_NAME|${ARTIFACTS_BUCKET}|g" \
-    "$f" > "${TMP}/$(basename "$f")"
+  envsubst '${GCP_PROJECT_ID} ${GCP_REGION} ${GCS_ARTIFACTS_BUCKET}' \
+    < "$f" > "${TMP}/$(basename "$f")"
 done
 
 echo "==> Applying manifests..."

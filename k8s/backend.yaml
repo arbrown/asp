@@ -5,7 +5,7 @@ metadata:
   namespace: default
   annotations:
     # Workload Identity — binds to the GCP SA created by Terraform
-    iam.gke.io/gcp-service-account: storybook-backend@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: storybook-backend@${GCP_PROJECT_ID}.iam.gserviceaccount.com
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,16 +27,16 @@ spec:
       serviceAccountName: storybook-backend
       containers:
         - name: backend
-          image: REGION-docker.pkg.dev/PROJECT_ID/storybook-images/backend:latest
+          image: ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/storybook-images/backend:latest
           ports:
             - containerPort: 8080
           env:
             - name: GCP_PROJECT_ID
-              value: "PROJECT_ID"
+              value: "${GCP_PROJECT_ID}"
             - name: GCP_REGION
-              value: "us-central1"
+              value: "${GCP_REGION}"
             - name: GCS_ARTIFACTS_BUCKET
-              value: "ARTIFACTS_BUCKET_NAME"
+              value: "${GCS_ARTIFACTS_BUCKET}"
           resources:
             requests:
               cpu: "500m"
