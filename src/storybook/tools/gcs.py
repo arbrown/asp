@@ -80,3 +80,29 @@ def read_blob(session_id: str, *path_parts: str) -> tuple[bytes, str]:
     blob.reload()
     data = blob.download_as_bytes()
     return data, blob.content_type or "application/octet-stream"
+
+
+# ── Resume helpers ─────────────────────────────────────────────────────────────
+
+def image_exists(session_id: str, page_number: int) -> bool:
+    key = _blob_path(session_id, "images", f"page_{page_number:02d}.png")
+    return _bucket().blob(key).exists()
+
+
+def load_image_bytes(session_id: str, page_number: int) -> bytes:
+    return read_bytes(session_id, "images", f"page_{page_number:02d}.png")
+
+
+def load_adapted_story(session_id: str) -> dict:
+    return json.loads(read_text(session_id, "adapted", "story.json"))
+
+
+def load_pages(session_id: str) -> list[str]:
+    bucket = _bucket()
+    prefix = _blob_path(session_id, "pages") + "/"
+    blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
+    return [b.download_as_text() for b in blobs if b.name.endswith(".txt")]
+
+
+def load_character_bible(session_id: str) -> dict:
+    return json.loads(read_text(session_id, "character_bible.json"))

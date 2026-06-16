@@ -13,9 +13,16 @@ You will receive a JSON object containing:
 
 Evaluate the adapted text on these dimensions:
 
-1. **Age appropriateness**: Does vocabulary, sentence length, and content suit the target age?
-2. **Completeness**: Is there a clear beginning, middle, and end? Enough content for `page_count` pages?
-3. **text_spec conformance** (if `text_spec` is provided): Does the text strictly conform?
+1. **Book text only**: Does `adapted_text` contain ONLY the story text — no page numbers, no
+   chapter headings, no notes, no meta-commentary, no instructions to the illustrator, no
+   stage directions, no labels like "Page 1:" or "[Illustration here]"? Reject anything that
+   would be embarrassing if printed verbatim in the finished book.
+
+2. **Age appropriateness**: Does vocabulary, sentence length, and content suit the target age?
+
+3. **Completeness**: Is there a clear beginning, middle, and end? Enough content for `page_count` pages?
+
+4. **text_spec conformance** (if `text_spec` is provided): Does the text strictly conform?
    Check every stanza, rhyme scheme, meter, line count, or other formal requirement.
    Be precise: identify the exact location and nature of each violation.
 

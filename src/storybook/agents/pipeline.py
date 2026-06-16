@@ -26,7 +26,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from storybook.agents.character_bible import character_bible_agent
-from storybook.agents.image_generator import generate_image
+from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
 from storybook.agents.page_splitter import split_into_pages
@@ -66,36 +66,72 @@ def _make_runner(agent: LlmAgent | LoopAgent) -> Runner:
     )
 
 
-async def _run_agent(runner: Runner, session_id: str, message: str, output_key: str | None = None) -> str:
+async def _run_agent(
+    runner: Runner,
+    session_id: str,
+    message: str,
+    output_key: str | None = None,
+    subject_image: bytes | None = None,
+    reference_image: bytes | None = None,
+    prev_page_image: bytes | None = None,
+) -> str:
     """Run an ADK agent and return the final text response.
 
     If output_key is provided, the return value is read from ADK session state
     rather than the streamed response — use this when a LoopAgent contains
     multiple sub-agents whose final responses would otherwise be concatenated.
+
+    subject_image: the image being evaluated (passed first, before reference).
+    reference_image: page 1's image for style comparison (second image part).
+    prev_page_image: the previous page's illustration for continuity checking (third image part).
+
+    Retries with exponential backoff on 429 RESOURCE_EXHAUSTED errors.
     """
-    await runner.session_service.create_session(
-        app_name=runner.app_name,
-        user_id="pipeline",
-        session_id=session_id,
-    )
-    final = ""
-    async for event in runner.run_async(
-        session_id=session_id,
-        user_id="pipeline",
-        new_message=types.Content(parts=[types.Part(text=message)]),
-    ):
-        if event.is_final_response() and event.content:
-            for part in event.content.parts:
-                if part.text:
-                    final = part.text  # overwrite — keep last event only
-    if output_key:
-        session = await runner.session_service.get_session(
+    parts: list[types.Part] = [types.Part(text=message)]
+    if subject_image:
+        parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=subject_image)))
+    if reference_image:
+        parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=reference_image)))
+    if prev_page_image:
+        parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=prev_page_image)))
+
+    for retry in range(5):
+        # Use a suffixed session ID on retries to avoid session-already-exists conflicts
+        sid = session_id if retry == 0 else f"{session_id}-retry{retry}"
+        await runner.session_service.create_session(
             app_name=runner.app_name,
             user_id="pipeline",
-            session_id=session_id,
+            session_id=sid,
         )
-        return (session.state.get(output_key) or final).strip()
-    return final.strip()
+        try:
+            final = ""
+            async for event in runner.run_async(
+                session_id=sid,
+                user_id="pipeline",
+                new_message=types.Content(parts=parts),
+            ):
+                if event.is_final_response() and event.content:
+                    for part in event.content.parts:
+                        if part.text:
+                            final = part.text  # overwrite — keep last event only
+
+            if output_key:
+                session = await runner.session_service.get_session(
+                    app_name=runner.app_name,
+                    user_id="pipeline",
+                    session_id=sid,
+                )
+                return (session.state.get(output_key) or final).strip()
+            return final.strip()
+
+        except Exception as exc:
+            msg = str(exc)
+            if ("RESOURCE_EXHAUSTED" in msg or "429" in msg) and retry < 4:
+                wait = 10 * (2 ** retry)  # 10s, 20s, 40s, 80s
+                log.warning("Rate limited on %s; retrying in %ds (attempt %d/5)", session_id, wait, retry + 1)
+                await asyncio.sleep(wait)
+            else:
+                raise
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -103,6 +139,7 @@ async def _run_agent(runner: Runner, session_id: str, message: str, output_key: 
 async def run_pipeline(
     state: PipelineState,
     progress_queue: asyncio.Queue,
+    resume: bool = False,
 ) -> PipelineState:
     """
     Execute the full storybook pipeline. Writes progress events to progress_queue.
@@ -116,88 +153,125 @@ async def run_pipeline(
     cfg = state.config
     age_params = cfg.age_params
 
-    # ── 1. Fetch source text ──────────────────────────────────────────────────
-    # Plain function — no LLM needed, and passing a full book through a model
-    # context just to echo it back causes timeouts.
-    await emit("fetching", 5)
-    if cfg.source.gutenberg_url:
-        state.source_text = await asyncio.to_thread(fetch_gutenberg_url, cfg.source.gutenberg_url)
-    else:
-        # Try progressively looser queries — combined rarely works on gutendex
-        candidates = [
-            cfg.source.title,
-            cfg.source.author,
-            cfg.source.title.split()[0] if cfg.source.title else None,
-        ]
-        results = []
-        for q in filter(None, candidates):
-            results = await asyncio.to_thread(search_gutenberg, q)
-            if results:
-                break
-        if not results:
-            raise RuntimeError(f"No Gutenberg results found for: {cfg.source.title!r} / {cfg.source.author!r}")
-        state.source_text = await asyncio.to_thread(fetch_gutenberg_url, results[0]["download_url"])
-    gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
-    await emit("fetching", 10, message="Source text fetched")
+    # ── 1-4. Fetch / adapt / split / character bible ──────────────────────────
+    # On resume, load completed artifacts from GCS and skip re-running stages.
+    bible_dict: dict = {}
 
-    # ── 2. Adapt + validate text ──────────────────────────────────────────────
-    await emit("adapting_text", 15)
-    loop_runner = _make_runner(_text_loop)
-    state.adapted_text = await _run_agent(
-        loop_runner,
-        sid,
-        json.dumps({
-            "source_text": state.source_text,
-            "config": cfg.model_dump(),
-        }),
-        output_key="adapted_text",
-    )
-    gcs.write_json(sid, "adapted", "story.json", data={
-        "title": cfg.source.title or "Untitled",
-        "author": cfg.source.author or "Unknown",
-        "target_age": cfg.target_age,
-        "adapted_text": state.adapted_text,
-    })
-    await emit("adapting_text", 30, message="Story adapted and validated")
+    if resume:
+        try:
+            story = await asyncio.to_thread(gcs.load_adapted_story, sid)
+            state.adapted_text = story.get("adapted_text", "")
+            await emit("fetching", 10, message="Loaded source from previous run")
+            await emit("adapting_text", 30, message="Loaded adapted story from previous run")
 
-    # ── 3. Split into pages ───────────────────────────────────────────────────
-    await emit("splitting_pages", 32)
-    state.pages = split_into_pages(
-        state.adapted_text,
-        cfg.page_count,
-        age_params["max_words_per_page"],
-    )
-    for i, page_text in enumerate(state.pages, 1):
-        gcs.write_text(sid, "pages", f"page_{i:02d}.txt", content=page_text)
-    await emit("splitting_pages", 35, message=f"Split into {len(state.pages)} pages")
+            state.pages = await asyncio.to_thread(gcs.load_pages, sid)
+            await emit("splitting_pages", 35, message=f"Loaded {len(state.pages)} pages")
 
-    # ── 4. Build character bible ──────────────────────────────────────────────
-    await emit("building_character_bible", 36)
-    bible_runner = _make_runner(character_bible_agent)
-    bible_json_str = await _run_agent(
-        bible_runner,
-        sid,
-        json.dumps({
+            bible_dict = await asyncio.to_thread(gcs.load_character_bible, sid)
+            state.character_bible = bible_dict  # type: ignore[assignment]
+            await emit("building_character_bible", 40, message="Loaded character bible from previous run")
+            log.info("Resume: loaded stages 1-4 from GCS for session %s", sid)
+        except Exception as exc:
+            log.warning("Resume: could not load GCS artifacts (%s) — re-running stages 1-4", exc)
+            resume = False  # fall through to fresh execution below
+
+    if not resume:
+        # ── 1. Fetch source text ──────────────────────────────────────────────
+        await emit("fetching", 5)
+        if cfg.source.gutenberg_url:
+            state.source_text = await asyncio.to_thread(fetch_gutenberg_url, cfg.source.gutenberg_url)
+        else:
+            candidates = [
+                cfg.source.title,
+                cfg.source.author,
+                cfg.source.title.split()[0] if cfg.source.title else None,
+            ]
+            results = []
+            for q in filter(None, candidates):
+                results = await asyncio.to_thread(search_gutenberg, q)
+                if results:
+                    break
+            if not results:
+                raise RuntimeError(f"No Gutenberg results found for: {cfg.source.title!r} / {cfg.source.author!r}")
+            state.source_text = await asyncio.to_thread(fetch_gutenberg_url, results[0]["download_url"])
+        gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+        await emit("fetching", 10, message="Source text fetched")
+
+        # ── 2. Adapt + validate text ──────────────────────────────────────────
+        await emit("adapting_text", 15)
+        loop_runner = _make_runner(_text_loop)
+        state.adapted_text = await _run_agent(
+            loop_runner,
+            sid,
+            json.dumps({
+                "source_text": state.source_text,
+                "config": cfg.model_dump(),
+            }),
+            output_key="adapted_text",
+        )
+        gcs.write_json(sid, "adapted", "story.json", data={
+            "title": cfg.source.title or "Untitled",
+            "author": cfg.source.author or "Unknown",
+            "target_age": cfg.target_age,
             "adapted_text": state.adapted_text,
-            "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
-        }),
-    )
-    # Strip markdown code fences if the model wrapped the JSON
-    bible_json_str = bible_json_str.strip().removeprefix("```json").removesuffix("```").strip()
-    bible_dict = json.loads(bible_json_str)
-    gcs.write_json(sid, "character_bible.json", data=bible_dict)
-    state.character_bible = bible_dict  # type: ignore[assignment]
-    await emit("building_character_bible", 40, message="Character bible built")
+        })
+        await emit("adapting_text", 30, message="Story adapted and validated")
 
-    # ── 5. Generate images per page ───────────────────────────────────────────
+        # ── 3. Split into pages ───────────────────────────────────────────────
+        await emit("splitting_pages", 32)
+        state.pages = split_into_pages(
+            state.adapted_text,
+            cfg.page_count,
+            age_params["max_words_per_page"],
+        )
+        for i, page_text in enumerate(state.pages, 1):
+            gcs.write_text(sid, "pages", f"page_{i:02d}.txt", content=page_text)
+        await emit("splitting_pages", 35, message=f"Split into {len(state.pages)} pages")
+
+        # ── 4. Build character bible ──────────────────────────────────────────
+        await emit("building_character_bible", 36)
+        bible_runner = _make_runner(character_bible_agent)
+        bible_json_str = await _run_agent(
+            bible_runner,
+            sid,
+            json.dumps({
+                "adapted_text": state.adapted_text,
+                "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
+            }),
+        )
+        bible_json_str = bible_json_str.strip().removeprefix("```json").removesuffix("```").strip()
+        bible_dict = json.loads(bible_json_str)
+        gcs.write_json(sid, "character_bible.json", data=bible_dict)
+        state.character_bible = bible_dict  # type: ignore[assignment]
+        await emit("building_character_bible", 40, message="Character bible built")
+
+    # ── 5. Generate images per page (parallel) ────────────────────────────────
     total_pages = len(state.pages)
-    image_bytes_list: list[bytes] = []
-    first_page_image_bytes: bytes | None = None
+    image_sem = asyncio.Semaphore(settings.image_concurrency)
+    llm_sem = asyncio.Semaphore(settings.llm_concurrency)
+    # page1_ready lets pages 2+ wait for the reference image before validating
+    page1_ready: asyncio.Event = asyncio.Event()
+    page1_image: list[bytes] = []  # single-element list so the coroutine can write it
+    completed: list[int] = [0]     # mutable counter safe in single-threaded asyncio
+    # Maps page_number -> (img_bytes, page_text) once that page finishes successfully.
+    # Used to provide the previous page's illustration and text to the validator.
+    completed_pages: dict[int, tuple[bytes, str]] = {}
 
-    for i, page_text in enumerate(state.pages, 1):
-        page_pct_start = 40 + int((i - 1) / total_pages * 50)
-        page_pct_end = 40 + int(i / total_pages * 50)
-        await emit("generating_image", page_pct_start, page=i, of=total_pages)
+    async def _process_page(i: int, page_text: str) -> tuple[int, bytes]:
+        # Resume: reuse image if it was already successfully generated
+        if resume and await asyncio.to_thread(gcs.image_exists, sid, i):
+            img_bytes = await asyncio.to_thread(gcs.load_image_bytes, sid, i)
+            if i == 1:
+                page1_image.append(img_bytes)
+                page1_ready.set()
+            completed_pages[i] = (img_bytes, page_text)
+            completed[0] += 1
+            pct = 40 + int(completed[0] / total_pages * 50)
+            await emit("generating_image", pct, page=i, of=total_pages, message="cached")
+            log.info("Resume: loaded existing image for page %d", i)
+            return i, img_bytes
+
+        await emit("generating_image", 40 + int(completed[0] / total_pages * 50), page=i, of=total_pages)
 
         prompt_input = json.dumps({
             "page_text": page_text,
@@ -208,29 +282,43 @@ async def run_pipeline(
             "is_first_page": i == 1,
         })
 
-        # Generate prompt
         prompt_runner = _make_runner(illustration_prompter)
-        image_prompt = await _run_agent(prompt_runner, f"{sid}-prompt-{i}", prompt_input)
-        gcs.write_text(sid, "prompts", f"page_{i:02d}_prompt.txt", content=image_prompt)
+        async with llm_sem:
+            image_prompt = await _run_agent(prompt_runner, f"{sid}-prompt-{i}", prompt_input)
+        await asyncio.to_thread(gcs.write_text, sid, "prompts", f"page_{i:02d}_prompt.txt", content=image_prompt)
 
-        # Generate image with retries
         img_bytes = await _generate_with_retries(
             session_id=sid,
             page_number=i,
             image_prompt=image_prompt,
             page_text=page_text,
             bible_dict=bible_dict,
-            reference_image=first_page_image_bytes,
+            image_sem=image_sem,
+            llm_sem=llm_sem,
+            page1_ready=page1_ready,
+            page1_image=page1_image,
             progress_queue=progress_queue,
+            completed_pages=completed_pages,
         )
 
-        gcs.write_bytes(sid, "images", f"page_{i:02d}.png", data=img_bytes, content_type="image/png")
-        image_bytes_list.append(img_bytes)
+        await asyncio.to_thread(
+            gcs.write_bytes, sid, "images", f"page_{i:02d}.png", data=img_bytes, content_type="image/png"
+        )
 
         if i == 1:
-            first_page_image_bytes = img_bytes
+            page1_image.append(img_bytes)
+            page1_ready.set()
 
-        await emit("generating_image", page_pct_end, page=i, of=total_pages, message="done")
+        # Store result before emitting "done" so adjacent pages can use it immediately
+        completed_pages[i] = (img_bytes, page_text)
+        completed[0] += 1
+        pct = 40 + int(completed[0] / total_pages * 50)
+        await emit("generating_image", pct, page=i, of=total_pages, message="done")
+        return i, img_bytes
+
+    tasks = [_process_page(i, page_text) for i, page_text in enumerate(state.pages, 1)]
+    results: dict[int, bytes] = {i: b for i, b in await asyncio.gather(*tasks)}
+    image_bytes_list = [results[i] for i in range(1, total_pages + 1)]
 
     state.image_gcs_uris = [
         f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/images/page_{i:02d}.png"
@@ -256,37 +344,140 @@ async def run_pipeline(
     return state
 
 
+def _simplify_prompt(original_prompt: str, bible_dict: dict, attempt: int) -> str:
+    """Return a progressively simpler prompt for content-policy retries."""
+    style = bible_dict.get("style", "children's book illustration, watercolor")
+    if attempt == 1:
+        # Strip character descriptions; keep only style + brief scene summary
+        first_sentence = original_prompt.split(".")[0].strip()
+        return (
+            f"{first_sentence}. {style}. "
+            "Children's storybook illustration, age-appropriate, cheerful, no violence, no adult content."
+        )
+    # Final fallback: fully generic scene
+    return (
+        f"A cheerful children's storybook illustration in the style of: {style}. "
+        "A whimsical outdoor scene with soft colors. No text, no people, no faces."
+    )
+
+
+def _placeholder_image(page_number: int) -> bytes:
+    """Generate a simple pastel placeholder PNG when all image attempts fail."""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    colors = ["#F4C2C2", "#C2D4F4", "#C2F4D4", "#F4E8C2", "#E8C2F4"]
+    bg = colors[(page_number - 1) % len(colors)]
+    img = Image.new("RGB", (768, 768), bg)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([20, 20, 747, 747], outline="#888888", width=3)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((384, 384), f"Page {page_number}", fill="#555555", font=font, anchor="mm")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 async def _generate_with_retries(
     session_id: str,
     page_number: int,
     image_prompt: str,
     page_text: str,
     bible_dict: dict,
-    reference_image: bytes | None,
+    image_sem: asyncio.Semaphore,
+    llm_sem: asyncio.Semaphore,
+    page1_ready: asyncio.Event,
+    page1_image: list[bytes],
     progress_queue: asyncio.Queue,
+    completed_pages: dict[int, tuple[bytes, str]],
 ) -> bytes:
-    """Generate an image with up to image_max_retries validation retries."""
+    """Generate an image with up to image_max_retries validation retries.
+
+    image_sem gates concurrent generate_image() calls against Vertex AI quota.
+    page1_ready / page1_image let pages 2+ wait for the reference image before
+    running validation — the actual generation does not wait.
+    completed_pages provides the previous page's illustration for continuity checking
+    if it has already finished (best-effort — no waiting).
+    Content-policy refusals (NO_IMAGE) are retried with progressively simpler
+    prompts before falling back to a placeholder so the pipeline never crashes.
+    """
     current_prompt = image_prompt
     validator_runner = _make_runner(image_validator)
+    img_bytes: bytes | None = None
 
     for attempt in range(1, settings.image_max_retries + 2):
-        img_bytes = await asyncio.to_thread(generate_image, current_prompt)
+        try:
+            async with image_sem:
+                img_bytes = await asyncio.to_thread(generate_image, current_prompt)
+        except (ImageContentPolicyError, ImageTokenLimitError) as exc:
+            is_policy = isinstance(exc, ImageContentPolicyError)
+            log.warning(
+                "%s on page %d attempt %d",
+                "Content policy refusal" if is_policy else "Token limit hit",
+                page_number, attempt,
+            )
+            if attempt <= settings.image_max_retries:
+                await progress_queue.put({
+                    "stage": "image_retry",
+                    "pct": 0,
+                    "page": page_number,
+                    "attempt": attempt,
+                    "reason": str(exc),
+                })
+                # Policy refusals: simplify immediately (same prompt won't help).
+                # Token limit: retry same prompt first (may be transient); simplify on attempt 2+.
+                if is_policy or attempt > 1:
+                    current_prompt = _simplify_prompt(current_prompt, bible_dict, attempt)
+            else:
+                log.error("All image attempts failed for page %d — using placeholder", page_number)
+                return _placeholder_image(page_number)
+            continue
 
-        # Validate — pass reference image on pages > 1
+        # For pages 2+, wait for page 1's image to be available as a style reference.
+        # This is usually a no-op: page 1 goes through the semaphore first and sets
+        # page1_ready before any other page finishes generation.
+        ref_image: bytes | None = None
+        if page_number > 1:
+            await page1_ready.wait()
+            ref_image = page1_image[0] if page1_image else None
+            log.debug("Page %d: reference image %s", page_number, "attached" if ref_image else "unavailable")
+
+        # Previous page context for continuity — best-effort, no waiting.
+        prev_result = completed_pages.get(page_number - 1) if page_number > 1 else None
+        prev_page_image_bytes = prev_result[0] if prev_result else None
+        prev_page_text_str = prev_result[1] if prev_result else None
+        if page_number > 1:
+            log.debug(
+                "Page %d: previous page context %s",
+                page_number,
+                "attached" if prev_page_image_bytes else "not yet available",
+            )
+
         validate_input = json.dumps({
             "image_prompt": current_prompt,
             "page_text": page_text,
             "character_bible": bible_dict,
             "page_number": page_number,
-            "reference_image_available": reference_image is not None,
+            "prev_page_text": prev_page_text_str,
         })
-        # TODO: attach reference_image bytes as multimodal part when ADK runner supports it
-        result = await _run_agent(
-            validator_runner, f"{session_id}-imgval-{page_number}-{attempt}", validate_input
-        )
+        async with llm_sem:
+            result = await _run_agent(
+                validator_runner,
+                f"{session_id}-imgval-{page_number}-{attempt}",
+                validate_input,
+                subject_image=img_bytes,
+                reference_image=ref_image,
+                prev_page_image=prev_page_image_bytes,
+            )
 
         if "approved" in result.lower():
             return img_bytes
+
+        log.warning("Image validation attempt %d failed for page %d", attempt, page_number)
 
         if attempt <= settings.image_max_retries:
             await progress_queue.put({
@@ -296,7 +487,6 @@ async def _generate_with_retries(
                 "attempt": attempt,
                 "reason": result[:200],
             })
-            # Pick up revised prompt from ADK session state (written by reject_image tool)
             session = await validator_runner.session_service.get_session(
                 app_name=validator_runner.app_name,
                 user_id="pipeline",
@@ -305,8 +495,5 @@ async def _generate_with_retries(
             if session and session.state.get("revised_image_prompt"):
                 current_prompt = session.state["revised_image_prompt"]
 
-        log.warning("Image validation attempt %d failed for page %d", attempt, page_number)
-
-    # Return last attempt even if validation didn't pass (we've exhausted retries)
     log.error("Exhausted image retries for page %d — using last generated image", page_number)
-    return img_bytes
+    return img_bytes if img_bytes is not None else _placeholder_image(page_number)

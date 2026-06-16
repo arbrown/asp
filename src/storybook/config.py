@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     text_max_retries: int = 3
     image_max_retries: int = 2
 
+    # Parallel image generation — max simultaneous generate_image() calls
+    image_concurrency: int = 3
+
+    # Max simultaneous LLM calls (prompt generation + validation combined)
+    llm_concurrency: int = 5
+
 
 settings = Settings()
 

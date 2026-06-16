@@ -44,3 +44,8 @@ async def reload_sessions() -> None:
         log.info("Reloaded %d session(s) from GCS", len(metas))
     except Exception:
         log.exception("Failed to reload sessions from GCS — starting with empty session list")
+
+
+@app.get("/healthz")
+async def health() -> dict:
+    return {"status": "ok"}

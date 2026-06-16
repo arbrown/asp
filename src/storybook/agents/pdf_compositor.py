@@ -126,7 +126,8 @@ def compose_pdf(
         img_b64 = ""
         if i < len(image_bytes_list) and image_bytes_list[i]:
             img_b64 = base64.b64encode(image_bytes_list[i]).decode()
-        page_data.append({"text": text, "image_b64": img_b64})
+        # Convert newlines to <br> so line breaks render in the PDF (autoescape=False)
+        page_data.append({"text": text.replace("\n", "<br>"), "image_b64": img_b64})
 
     html_content = _PAGE_TEMPLATE.render(
         title=title,

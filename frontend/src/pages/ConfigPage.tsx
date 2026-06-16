@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { createSession, listSessions, type SessionConfig, type SessionSummary } from "../lib/api";
+import { createSession, getLuckyConfig, listSessions, type SessionConfig, type SessionSummary } from "../lib/api";
 
 const AGE_OPTIONS = [
   { value: "4-5", label: "Ages 4–5 (Pre-K)" },
@@ -19,6 +19,7 @@ function sessionLabel(s: SessionSummary): string {
 export default function ConfigPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [lucky, setLucky] = useState(false);
   const [error, setError] = useState("");
   const [pastSessions, setPastSessions] = useState<SessionSummary[]>([]);
 
@@ -66,6 +67,27 @@ export default function ConfigPage() {
     }
   }
 
+  async function handleLucky() {
+    setLucky(true);
+    setError("");
+    try {
+      const cfg = await getLuckyConfig();
+      setForm({
+        source: { gutenberg_url: "", title: cfg.title, author: cfg.author },
+        target_age: cfg.target_age,
+        page_count: cfg.page_count,
+        language: "en",
+        text_spec: cfg.text_spec,
+        image_spec: cfg.image_spec,
+        custom_instructions: cfg.custom_instructions,
+      });
+    } catch (err) {
+      setError(`Lucky generation failed: ${err}`);
+    } finally {
+      setLucky(false);
+    }
+  }
+
   function fillExample() {
     setForm({
       source: { gutenberg_url: "", title: "Eugene Onegin", author: "Alexander Pushkin" },
@@ -80,12 +102,35 @@ export default function ConfigPage() {
 
   return (
     <div className="max-w-2xl mx-auto">
-      <div className="flex items-baseline justify-between mb-8">
+      <div className="flex items-center justify-between mb-8">
         <h1 className="text-3xl font-serif font-bold text-sepia-900">New Storybook</h1>
-        <button type="button" onClick={fillExample}
-          className="text-sm text-sepia-500 hover:text-sepia-900 underline underline-offset-2 transition-colors">
-          Fill example
-        </button>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={fillExample}
+            className="text-sm text-sepia-500 hover:text-sepia-900 underline underline-offset-2 transition-colors">
+            Fill example
+          </button>
+          <button
+            type="button"
+            onClick={handleLucky}
+            disabled={lucky || loading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm text-white disabled:opacity-60 transition-all shadow-sm hover:shadow-md active:scale-95"
+            style={{ background: "linear-gradient(135deg, #7c3aed 0%, #4f46e5 50%, #0ea5e9 100%)" }}
+          >
+            {lucky ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" d="M12 3a9 9 0 1 0 9 9" />
+                </svg>
+                Generating…
+              </>
+            ) : (
+              <>
+                <GemIcon />
+                I'm Feeling Lucky
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {pastSessions.length > 0 && (
@@ -249,6 +294,19 @@ export default function ConfigPage() {
         </div>
       </form>
     </div>
+  );
+}
+
+function GemIcon() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      {/* Top facets */}
+      <path d="M8.5 3h7l3.5 4.5H5L8.5 3z" fillOpacity="0.85" />
+      {/* Bottom body */}
+      <path d="M5 7.5l7 13.5 7-13.5H5z" fillOpacity="0.95" />
+      {/* Inner highlight */}
+      <path d="M10 7.5l2 10 2-10h-4z" fill="white" fillOpacity="0.25" />
+    </svg>
   );
 }
 

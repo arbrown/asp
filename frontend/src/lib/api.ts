@@ -23,6 +23,7 @@ export interface SessionSummary {
   config?: SessionConfig;
   pdf_signed_url?: string;
   errors: string[];
+  resumable?: boolean;
 }
 
 export interface ProgressEvent {
@@ -37,6 +38,22 @@ export interface ProgressEvent {
   reason?: string;
 }
 
+export interface LuckyConfig {
+  title: string;
+  author: string;
+  target_age: string;
+  page_count: number;
+  text_spec: string;
+  image_spec: string;
+  custom_instructions: string;
+}
+
+export async function getLuckyConfig(): Promise<LuckyConfig> {
+  const res = await fetch(`${BASE}/lucky`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function createSession(config: SessionConfig): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",
@@ -49,6 +66,12 @@ export async function createSession(config: SessionConfig): Promise<SessionSumma
 
 export async function getSession(id: string): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions/${id}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function resumeSession(id: string): Promise<SessionSummary> {
+  const res = await fetch(`${BASE}/sessions/${id}/resume`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
