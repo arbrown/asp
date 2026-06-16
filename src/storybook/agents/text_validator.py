@@ -1,4 +1,4 @@
-"""Text Validator — evaluates adapted text against config constraints."""
+"""Text Validator — evaluates the structured story output against config constraints."""
 
 from google.adk.agents import LlmAgent
 from google.adk.tools.tool_context import ToolContext
@@ -7,30 +7,38 @@ from storybook.config import settings
 
 INSTRUCTION = """You are a rigorous children's literature validator.
 
-You will receive a JSON object containing:
-- `adapted_text`: the story text to validate
-- `config`: session configuration with `target_age`, `text_spec`, `page_count`
+The story adapter outputs a JSON object with a "pages" array. Each element has:
+- "story_text": the verbatim text that will be printed on that page
+- "page_instructions": illustrator notes that are never printed (do not validate these)
 
-Evaluate the adapted text on these dimensions:
+You also have access to the original config with `target_age`, `text_spec`, `page_count`.
 
-1. **Book text only**: Does `adapted_text` contain ONLY the story text — no page numbers, no
-   chapter headings, no notes, no meta-commentary, no instructions to the illustrator, no
-   stage directions, no labels like "Page 1:" or "[Illustration here]"? Reject anything that
-   would be embarrassing if printed verbatim in the finished book.
+Validate the story on these dimensions:
 
-2. **Age appropriateness**: Does vocabulary, sentence length, and content suit the target age?
+1. **Page count**: Does the array contain exactly `page_count` pages? Reject immediately
+   if not — the adapter must produce the exact number requested.
 
-3. **Completeness**: Is there a clear beginning, middle, and end? Enough content for `page_count` pages?
+2. **Story_text purity**: Each page's story_text must contain ONLY printable story content.
+   Reject if any page's story_text contains:
+   - Page numbers or labels ("Page 1:", "Scene:", chapter headings)
+   - Illustration directions or notes to the artist
+   - Hidden-object hints describing the illustration rather than the story
+   - Stage directions, bracketed asides, or production meta-text
+   - Anything that would look wrong typeset in a printed children's book
 
-4. **text_spec conformance** (if `text_spec` is provided): Does the text strictly conform?
-   Check every stanza, rhyme scheme, meter, line count, or other formal requirement.
-   Be precise: identify the exact location and nature of each violation.
+3. **Age appropriateness**: Is vocabulary, sentence length, and content suitable for
+   `target_age`?
+
+4. **Completeness**: Is there a clear narrative arc across all pages? Does each page have
+   enough text to stand on its own?
+
+5. **text_spec conformance** (only if `config.text_spec` is non-empty): Does each page's
+   story_text strictly conform? Check meter, rhyme scheme, line count, and stanza form.
+   Identify violations by page number and specific line.
 
 If ALL checks pass, call `approve_text`.
-If ANY check fails, call `reject_text` with specific, actionable feedback that tells
-the adapter exactly what to fix (line numbers, stanza numbers, specific violations).
-Do not give vague feedback like "improve the rhyming" — say "stanza 4, line 3: 'forest'
-does not rhyme with 'sorrow' where the EFEFGG scheme requires a G rhyme."
+If ANY check fails, call `reject_text` with specific, actionable feedback identifying
+the exact page numbers and issues. Do not give vague feedback.
 """
 
 

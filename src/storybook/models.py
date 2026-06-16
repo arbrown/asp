@@ -33,6 +33,11 @@ class SessionConfig(BaseModel):
         return AGE_PARAMS.get(self.target_age, AGE_PARAMS["4-5"])
 
 
+class StoryPage(BaseModel):
+    story_text: str          # Verbatim text printed in the book
+    page_instructions: str = ""  # Scene notes for the illustrator, never printed
+
+
 class CharacterBible(BaseModel):
     style: str
     palette: list[str] = []
@@ -52,7 +57,7 @@ class PipelineState(BaseModel):
 
     source_text: str = ""
     adapted_text: str = ""
-    pages: list[str] = []
+    pages: list[StoryPage] = []
     character_bible: Optional[CharacterBible] = None
     image_gcs_uris: list[str] = []
     pdf_gcs_uri: str = ""

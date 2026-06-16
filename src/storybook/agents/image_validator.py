@@ -10,7 +10,8 @@ INSTRUCTION = """You are a quality control reviewer for children's storybook ill
 You will receive a message with up to four parts:
 1. A JSON text part containing:
    - `image_prompt`: the prompt used to generate this image
-   - `page_text`: the story text this image should illustrate
+   - `page_text`: the story text printed on this page
+   - `page_instructions`: scene notes from the author (what to depict, hidden elements, motifs)
    - `character_bible`: the visual consistency document
    - `page_number`: current page number
    - `prev_page_text`: the previous page's story text, or null if not available
@@ -23,8 +24,8 @@ looks like — look at it directly.
 
 Evaluate on these dimensions:
 
-1. **Scene accuracy**: Does the image depict the scene described in `page_text`?
-   Wrong setting or characters present is an immediate rejection.
+1. **Scene accuracy**: Does the image depict the scene described in `page_instructions`
+   (and consistent with `page_text`)? Wrong setting or characters is an immediate rejection.
 
 2. **Character consistency**: Do visible characters match their descriptions in
    `character_bible.characters`? Call out specific discrepancies (wrong hair color,

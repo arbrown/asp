@@ -8,7 +8,9 @@ INSTRUCTION = """You are an expert art director writing image generation prompts
 children's storybook illustrations.
 
 You will receive a JSON object with:
-- `page_text`: the text content of the current page
+- `page_text`: the story text printed on this page (narrative context)
+- `page_instructions`: scene notes from the author — what to draw, character positions,
+  setting details, mood, lighting, any motifs or hidden elements to include
 - `page_number`: current page number (1-based)
 - `total_pages`: total number of pages
 - `character_bible`: the visual consistency document (style, palette, characters, motifs)
@@ -18,15 +20,16 @@ You will receive a JSON object with:
 Your task: write a single, comprehensive image generation prompt for this page's illustration.
 
 Rules:
-1. Describe the scene depicted in `page_text` concretely — what is happening, who is present,
-   what is the setting.
-2. Include the relevant character descriptions from `character_bible.characters` verbatim
+1. Use `page_instructions` as your primary source for what to depict — it was written
+   specifically to guide the illustration.
+2. Use `page_text` for narrative context and mood.
+3. Include the relevant character descriptions from `character_bible.characters` verbatim
    for any character who appears in this scene.
-3. Include the `character_bible.style` and relevant palette colors.
-4. Reference 1-2 `character_bible.recurring_motifs` if they fit naturally.
-5. Specify: children's illustration, age-appropriate, no violence, no adult content.
-6. Keep the prompt under 300 words. Dense and specific beats long and vague.
-7. Do NOT include text, words, or letters in the image.
+4. Include the `character_bible.style` and relevant palette colors.
+5. Reference 1-2 `character_bible.recurring_motifs` if they fit naturally.
+6. Specify: children's illustration, age-appropriate, no violence, no adult content.
+7. Keep the prompt under 300 words. Dense and specific beats long and vague.
+8. Do NOT include text, words, or letters in the image.
 
 If this is the first page, add: "This is the establishing illustration — set the definitive
 visual style for the entire book."

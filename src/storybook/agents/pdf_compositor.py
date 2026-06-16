@@ -101,17 +101,17 @@ _PAGE_TEMPLATE = Template("""
 def compose_pdf(
     title: str,
     author: str,
-    pages: list[str],
+    pages: list,
     image_bytes_list: list[bytes],
     target_age: str = "4-5",
 ) -> bytes:
     """
-    Render a storybook PDF from page texts and illustration bytes.
+    Render a storybook PDF from StoryPage objects and illustration bytes.
 
     Args:
         title: Book title for the cover.
         author: Original author attribution.
-        pages: List of page text strings (one per page).
+        pages: List of StoryPage objects (only story_text is printed).
         image_bytes_list: List of PNG bytes (one per page; may be shorter than pages).
         target_age: Used to set font size.
 
@@ -122,10 +122,12 @@ def compose_pdf(
     font_size = font_sizes.get(target_age, 16)
 
     page_data = []
-    for i, text in enumerate(pages):
+    for i, page in enumerate(pages):
         img_b64 = ""
         if i < len(image_bytes_list) and image_bytes_list[i]:
             img_b64 = base64.b64encode(image_bytes_list[i]).decode()
+        # Use only story_text — page_instructions are never printed
+        text = page.story_text if hasattr(page, "story_text") else str(page)
         # Convert newlines to <br> so line breaks render in the PDF (autoescape=False)
         page_data.append({"text": text.replace("\n", "<br>"), "image_b64": img_b64})
 

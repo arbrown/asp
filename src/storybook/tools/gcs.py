@@ -97,11 +97,16 @@ def load_adapted_story(session_id: str) -> dict:
     return json.loads(read_text(session_id, "adapted", "story.json"))
 
 
-def load_pages(session_id: str) -> list[str]:
+def load_pages(session_id: str) -> list:
+    """Return list[StoryPage] for all pages stored in GCS (JSON format)."""
+    from storybook.models import StoryPage
     bucket = _bucket()
     prefix = _blob_path(session_id, "pages") + "/"
     blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
-    return [b.download_as_text() for b in blobs if b.name.endswith(".txt")]
+    pages = [StoryPage(**json.loads(b.download_as_text())) for b in blobs if b.name.endswith(".json")]
+    if not pages:
+        raise ValueError(f"No page JSON files found in GCS for session {session_id}")
+    return pages
 
 
 def load_character_bible(session_id: str) -> dict:

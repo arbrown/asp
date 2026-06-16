@@ -5,10 +5,10 @@ Architecture:
   Workflow (sequential):
     1. literature_fetcher  — fetches source text via URL or Gutenberg search
     2. adapt_validate_loop — LoopAgent: story_adapter → text_validator (up to 4 retries)
-    3. page_splitter_step  — deterministic function splits text into N pages
-    4. character_bible     — builds visual consistency doc
-    5. image_loop_step     — Python function: for each page, run prompt→generate→validate
-    6. pdf_step            — composes final PDF, uploads to GCS, returns signed URL
+                             Adapter returns structured JSON: {pages: [{story_text, page_instructions}]}
+    3. character_bible     — builds visual consistency doc from assembled story_text
+    4. image_loop_step     — Python function: for each page, run prompt→generate→validate
+    5. pdf_step            — composes final PDF (story_text only), uploads to GCS
 
 Progress events are written to an asyncio.Queue for SSE streaming.
 """
@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
 
 from google.adk.agents import LlmAgent, LoopAgent
 from google.adk.runners import Runner
@@ -29,12 +28,11 @@ from storybook.agents.character_bible import character_bible_agent
 from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
-from storybook.agents.page_splitter import split_into_pages
 from storybook.agents.pdf_compositor import compose_pdf
 from storybook.agents.story_adapter import story_adapter
 from storybook.agents.text_validator import text_validator
 from storybook.config import settings
-from storybook.models import PipelineState, SessionConfig
+from storybook.models import PipelineState, SessionConfig, StoryPage
 from storybook.tools import gcs
 from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
 
@@ -162,10 +160,10 @@ async def run_pipeline(
             story = await asyncio.to_thread(gcs.load_adapted_story, sid)
             state.adapted_text = story.get("adapted_text", "")
             await emit("fetching", 10, message="Loaded source from previous run")
-            await emit("adapting_text", 30, message="Loaded adapted story from previous run")
+            await emit("adapting_text", 35, message="Loaded adapted story from previous run")
 
             state.pages = await asyncio.to_thread(gcs.load_pages, sid)
-            await emit("splitting_pages", 35, message=f"Loaded {len(state.pages)} pages")
+            await emit("adapting_text", 35, message=f"Loaded {len(state.pages)} pages")
 
             bible_dict = await asyncio.to_thread(gcs.load_character_bible, sid)
             state.character_bible = bible_dict  # type: ignore[assignment]
@@ -198,6 +196,7 @@ async def run_pipeline(
         await emit("fetching", 10, message="Source text fetched")
 
         # ── 2. Adapt + validate text ──────────────────────────────────────────
+        # The adapter produces structured JSON: {"pages": [{story_text, page_instructions}]}
         await emit("adapting_text", 15)
         loop_runner = _make_runner(_text_loop)
         state.adapted_text = await _run_agent(
@@ -209,33 +208,37 @@ async def run_pipeline(
             }),
             output_key="adapted_text",
         )
+        # Parse structured output into StoryPage objects
+        adapted_raw = state.adapted_text.strip().removeprefix("```json").removesuffix("```").strip()
+        try:
+            parsed = json.loads(adapted_raw)
+            state.pages = [StoryPage(**p) for p in parsed["pages"]]
+        except Exception as exc:
+            raise RuntimeError(f"Story adapter returned invalid JSON: {exc}\n\nRaw output:\n{state.adapted_text[:500]}")
+        if len(state.pages) != cfg.page_count:
+            raise RuntimeError(
+                f"Story adapter produced {len(state.pages)} pages but {cfg.page_count} were requested."
+            )
         gcs.write_json(sid, "adapted", "story.json", data={
             "title": cfg.source.title or "Untitled",
             "author": cfg.source.author or "Unknown",
             "target_age": cfg.target_age,
             "adapted_text": state.adapted_text,
         })
-        await emit("adapting_text", 30, message="Story adapted and validated")
-
-        # ── 3. Split into pages ───────────────────────────────────────────────
-        await emit("splitting_pages", 32)
-        state.pages = split_into_pages(
-            state.adapted_text,
-            cfg.page_count,
-            age_params["max_words_per_page"],
-        )
-        for i, page_text in enumerate(state.pages, 1):
-            gcs.write_text(sid, "pages", f"page_{i:02d}.txt", content=page_text)
-        await emit("splitting_pages", 35, message=f"Split into {len(state.pages)} pages")
+        for i, page in enumerate(state.pages, 1):
+            gcs.write_json(sid, "pages", f"page_{i:02d}.json", data=page.model_dump())
+        await emit("adapting_text", 35, message=f"Story adapted and split into {len(state.pages)} pages")
 
         # ── 4. Build character bible ──────────────────────────────────────────
         await emit("building_character_bible", 36)
         bible_runner = _make_runner(character_bible_agent)
+        # Pass assembled story_text (not raw JSON) so the bible builder reads narrative prose
+        story_text_for_bible = "\n\n".join(p.story_text for p in state.pages)
         bible_json_str = await _run_agent(
             bible_runner,
             sid,
             json.dumps({
-                "adapted_text": state.adapted_text,
+                "adapted_text": story_text_for_bible,
                 "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
             }),
         )
@@ -257,14 +260,14 @@ async def run_pipeline(
     # Used to provide the previous page's illustration and text to the validator.
     completed_pages: dict[int, tuple[bytes, str]] = {}
 
-    async def _process_page(i: int, page_text: str) -> tuple[int, bytes]:
+    async def _process_page(i: int, page: StoryPage) -> tuple[int, bytes]:
         # Resume: reuse image if it was already successfully generated
         if resume and await asyncio.to_thread(gcs.image_exists, sid, i):
             img_bytes = await asyncio.to_thread(gcs.load_image_bytes, sid, i)
             if i == 1:
                 page1_image.append(img_bytes)
                 page1_ready.set()
-            completed_pages[i] = (img_bytes, page_text)
+            completed_pages[i] = (img_bytes, page.story_text)
             completed[0] += 1
             pct = 40 + int(completed[0] / total_pages * 50)
             await emit("generating_image", pct, page=i, of=total_pages, message="cached")
@@ -274,7 +277,8 @@ async def run_pipeline(
         await emit("generating_image", 40 + int(completed[0] / total_pages * 50), page=i, of=total_pages)
 
         prompt_input = json.dumps({
-            "page_text": page_text,
+            "page_text": page.story_text,
+            "page_instructions": page.page_instructions,
             "page_number": i,
             "total_pages": total_pages,
             "character_bible": bible_dict,
@@ -291,7 +295,8 @@ async def run_pipeline(
             session_id=sid,
             page_number=i,
             image_prompt=image_prompt,
-            page_text=page_text,
+            page_text=page.story_text,
+            page_instructions=page.page_instructions,
             bible_dict=bible_dict,
             image_sem=image_sem,
             llm_sem=llm_sem,
@@ -310,13 +315,13 @@ async def run_pipeline(
             page1_ready.set()
 
         # Store result before emitting "done" so adjacent pages can use it immediately
-        completed_pages[i] = (img_bytes, page_text)
+        completed_pages[i] = (img_bytes, page.story_text)
         completed[0] += 1
         pct = 40 + int(completed[0] / total_pages * 50)
         await emit("generating_image", pct, page=i, of=total_pages, message="done")
         return i, img_bytes
 
-    tasks = [_process_page(i, page_text) for i, page_text in enumerate(state.pages, 1)]
+    tasks = [_process_page(i, page) for i, page in enumerate(state.pages, 1)]
     results: dict[int, bytes] = {i: b for i, b in await asyncio.gather(*tasks)}
     image_bytes_list = [results[i] for i in range(1, total_pages + 1)]
 
@@ -387,6 +392,7 @@ async def _generate_with_retries(
     page_number: int,
     image_prompt: str,
     page_text: str,
+    page_instructions: str,
     bible_dict: dict,
     image_sem: asyncio.Semaphore,
     llm_sem: asyncio.Semaphore,
@@ -460,6 +466,7 @@ async def _generate_with_retries(
         validate_input = json.dumps({
             "image_prompt": current_prompt,
             "page_text": page_text,
+            "page_instructions": page_instructions,
             "character_bible": bible_dict,
             "page_number": page_number,
             "prev_page_text": prev_page_text_str,
