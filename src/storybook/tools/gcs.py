@@ -93,6 +93,15 @@ def load_image_bytes(session_id: str, page_number: int) -> bytes:
     return read_bytes(session_id, "images", f"page_{page_number:02d}.png")
 
 
+def html_exists(session_id: str, page_number: int) -> bool:
+    key = _blob_path(session_id, "pages", f"page_{page_number:02d}.html")
+    return _bucket().blob(key).exists()
+
+
+def load_page_html(session_id: str, page_number: int) -> str:
+    return read_text(session_id, "pages", f"page_{page_number:02d}.html")
+
+
 def load_adapted_story(session_id: str) -> dict:
     return json.loads(read_text(session_id, "adapted", "story.json"))
 

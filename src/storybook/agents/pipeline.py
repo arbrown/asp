@@ -28,7 +28,7 @@ from storybook.agents.character_bible import character_bible_agent
 from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
-from storybook.agents.pdf_compositor import compose_pdf
+from storybook.agents.pdf_compositor import compose_pdf, render_cover_html, render_page_html
 from storybook.agents.story_adapter import story_adapter
 from storybook.agents.text_validator import text_validator
 from storybook.config import settings
@@ -227,6 +227,11 @@ async def run_pipeline(
         })
         for i, page in enumerate(state.pages, 1):
             gcs.write_json(sid, "pages", f"page_{i:02d}.json", data=page.model_dump())
+        cover_html = render_cover_html(
+            title=cfg.source.title or "A Children's Storybook",
+            author=cfg.source.author or "Unknown",
+        )
+        gcs.write_text(sid, "pages", "cover.html", content=cover_html)
         await emit("adapting_text", 35, message=f"Story adapted and split into {len(state.pages)} pages")
 
         # ── 4. Build character bible ──────────────────────────────────────────
@@ -272,6 +277,8 @@ async def run_pipeline(
             pct = 40 + int(completed[0] / total_pages * 50)
             await emit("generating_image", pct, page=i, of=total_pages, message="cached")
             log.info("Resume: loaded existing image for page %d", i)
+            page_html = render_page_html(i, page.story_text, img_bytes, cfg.target_age)
+            await asyncio.to_thread(gcs.write_text, sid, "pages", f"page_{i:02d}.html", content=page_html)
             return i, img_bytes
 
         await emit("generating_image", 40 + int(completed[0] / total_pages * 50), page=i, of=total_pages)
@@ -309,6 +316,8 @@ async def run_pipeline(
         await asyncio.to_thread(
             gcs.write_bytes, sid, "images", f"page_{i:02d}.png", data=img_bytes, content_type="image/png"
         )
+        page_html = render_page_html(i, page.story_text, img_bytes, cfg.target_age)
+        await asyncio.to_thread(gcs.write_text, sid, "pages", f"page_{i:02d}.html", content=page_html)
 
         if i == 1:
             page1_image.append(img_bytes)
@@ -327,6 +336,10 @@ async def run_pipeline(
 
     state.image_gcs_uris = [
         f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/images/page_{i:02d}.png"
+        for i in range(1, total_pages + 1)
+    ]
+    state.html_gcs_uris = [
+        f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/pages/page_{i:02d}.html"
         for i in range(1, total_pages + 1)
     ]
 

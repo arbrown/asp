@@ -238,6 +238,21 @@ async def get_session(session_id: str) -> SessionResponse:
     )
 
 
+@router.get("/sessions/{session_id}/pages/{page_number}/html")
+async def get_page_html(session_id: str, page_number: int) -> Response:
+    if session_id not in _sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        data = gcs.read_bytes(session_id, "pages", f"page_{page_number:02d}.html")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Page HTML not ready")
+    return Response(
+        content=data,
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @router.get("/sessions/{session_id}/images/{page_number}")
 async def get_page_image(session_id: str, page_number: int) -> Response:
     state = _sessions.get(session_id)

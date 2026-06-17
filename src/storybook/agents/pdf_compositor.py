@@ -8,6 +8,8 @@ from pathlib import Path
 from jinja2 import Template
 from weasyprint import HTML
 
+_FONT_SIZES = {"4-5": 20, "6-8": 16, "9-12": 13}
+
 _PAGE_TEMPLATE = Template("""
 <!DOCTYPE html>
 <html>
@@ -97,6 +99,139 @@ _PAGE_TEMPLATE = Template("""
 </html>
 """)
 
+_SINGLE_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Georgia', serif;
+    background: #e8e4dc;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 1rem;
+  }
+  .page {
+    width: 8.5in;
+    min-height: 11in;
+    background: #fffdf7;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5in;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }
+  .illustration {
+    width: 100%;
+    max-height: 6.5in;
+    object-fit: contain;
+    border-radius: 8px;
+    margin-bottom: 0.3in;
+  }
+  .page-text {
+    font-size: {{ font_size }}pt;
+    line-height: 1.7;
+    text-align: center;
+    color: #1a1a1a;
+    max-width: 6.5in;
+  }
+  .page-number {
+    margin-top: auto;
+    padding-top: 0.3in;
+    font-size: 10pt;
+    color: #999;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  {% if image_b64 %}
+  <img class="illustration"
+       src="data:image/png;base64,{{ image_b64 }}"
+       alt="Illustration for page {{ page_number }}">
+  {% endif %}
+  <div class="page-text">{{ text }}</div>
+  <div class="page-number">{{ page_number }}</div>
+</div>
+</body>
+</html>
+""")
+
+_COVER_TEMPLATE = Template("""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Georgia', serif;
+    background: #e8e4dc;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 1rem;
+  }
+  .page {
+    width: 8.5in;
+    min-height: 11in;
+    background: #f5efe0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 0.5in;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }
+  .cover-title {
+    font-size: 48pt;
+    font-weight: bold;
+    text-align: center;
+    color: #2c1a0e;
+    margin-bottom: 0.3in;
+    line-height: 1.2;
+  }
+  .cover-author {
+    font-size: 18pt;
+    color: #5c3d1e;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="cover-title">{{ title }}</div>
+  <div class="cover-author">Adapted from {{ author }}</div>
+</div>
+</body>
+</html>
+""")
+
+
+def render_page_html(
+    page_number: int,
+    story_text: str,
+    image_bytes: bytes,
+    target_age: str = "4-5",
+) -> str:
+    """Render a single story page as a self-contained HTML document with embedded image."""
+    font_size = _FONT_SIZES.get(target_age, 16)
+    img_b64 = base64.b64encode(image_bytes).decode() if image_bytes else ""
+    return _SINGLE_PAGE_TEMPLATE.render(
+        page_number=page_number,
+        text=story_text.replace("\n", "<br>"),
+        image_b64=img_b64,
+        font_size=font_size,
+    )
+
+
+def render_cover_html(title: str, author: str) -> str:
+    """Render the cover page as a self-contained HTML document."""
+    return _COVER_TEMPLATE.render(title=title, author=author)
+
 
 def compose_pdf(
     title: str,
@@ -118,8 +253,7 @@ def compose_pdf(
     Returns:
         PDF as bytes.
     """
-    font_sizes = {"4-5": 20, "6-8": 16, "9-12": 13}
-    font_size = font_sizes.get(target_age, 16)
+    font_size = _FONT_SIZES.get(target_age, 16)
 
     page_data = []
     for i, page in enumerate(pages):
