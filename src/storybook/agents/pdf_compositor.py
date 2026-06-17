@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 
 from jinja2 import Template
 from weasyprint import HTML
 
 _FONT_SIZES = {"4-5": 20, "6-8": 16, "9-12": 13}
+
+
+def _md_to_html(text: str) -> str:
+    """Convert markdown emphasis to HTML tags. Bold processed before italic to avoid partial matches."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text, flags=re.DOTALL)
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text, flags=re.DOTALL)
+    text = re.sub(r'_(.+?)_', r'<em>\1</em>', text, flags=re.DOTALL)
+    return text
 
 _VALID_IMAGE_POSITIONS = {"top", "bottom", "background", "left", "right"}
 
@@ -343,7 +353,7 @@ def render_page_html(
     image_position = spec.get("image_position", "top")
     return _SINGLE_PAGE_TEMPLATE.render(
         page_number=page_number,
-        text=story_text.replace("\n", "<br>"),
+        text=_md_to_html(story_text).replace("\n", "<br>"),
         image_b64=img_b64,
         layout_css=layout_css,
         image_position=image_position,
@@ -384,8 +394,7 @@ def compose_pdf(
             img_b64 = base64.b64encode(image_bytes_list[i]).decode()
         # Use only story_text — page_instructions are never printed
         text = page.story_text if hasattr(page, "story_text") else str(page)
-        # Convert newlines to <br> so line breaks render in the PDF (autoescape=False)
-        page_data.append({"text": text.replace("\n", "<br>"), "image_b64": img_b64})
+        page_data.append({"text": _md_to_html(text).replace("\n", "<br>"), "image_b64": img_b64})
 
     html_content = _PAGE_TEMPLATE.render(
         title=title,

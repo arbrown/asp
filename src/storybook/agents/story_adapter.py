@@ -21,6 +21,9 @@ Each object has exactly two fields:
     notes, asides to the illustrator, or hidden-object hints. Must read naturally as
     printed book text with no evidence of production instructions. If `text_spec` requires
     a specific poetic form, every line of story_text must conform to it exactly.
+    You may use **word** for bold and *word* for italic when emphasis genuinely serves the
+    text (a shout, a title, a key word). Use sparingly. These will be rendered as HTML
+    <strong> and <em> tags — do not use any other markup.
 
   "page_instructions": Scene notes for the illustrator. Describe what to draw: setting,
     character positions and expressions, action, lighting, mood, any motifs or hidden
