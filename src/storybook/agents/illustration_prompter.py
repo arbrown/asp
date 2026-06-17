@@ -30,6 +30,10 @@ Rules:
 6. Specify: children's illustration, age-appropriate, no violence, no adult content.
 7. Keep the prompt under 300 words. Dense and specific beats long and vague.
 8. Do NOT include text, words, or letters in the image.
+9. Use ONLY the character descriptions from the character bible — never describe a character
+   in any way that could be associated with a film or animation studio's adaptation. The bible
+   descriptions are already original; reproduce them faithfully and do not layer on any
+   recognizable pop-culture visual clichés.
 
 If this is the first page, add: "This is the establishing illustration — set the definitive
 visual style for the entire book."

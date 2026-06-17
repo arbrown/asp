@@ -28,6 +28,14 @@ Produce a character bible as a JSON object with exactly these keys:
 Be precise and specific. "Dark hair" is useless to an illustrator. "Dark brown hair swept back
 from the forehead, with a single loose curl at the temple" is useful.
 
+CRITICAL — original interpretations only: All character descriptions must be original visual
+interpretations drawn from the source text alone. Do NOT reproduce or reference the appearance
+of characters from any film, animation, TV, or stage adaptation. If the source text does not
+specify a detail (hair color, clothing color, etc.), invent something original — do not default
+to whatever the most famous adaptation uses. The goal is a fresh illustration, not a derivative
+of existing IP. For example, if adapting a story whose characters were made famous by a major
+studio, actively choose different colors, silhouettes, and styling from that studio's version.
+
 If no `image_spec` is provided, infer an appropriate illustration style from the story's
 setting, time period, and tone.
 

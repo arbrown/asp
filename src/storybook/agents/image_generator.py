@@ -53,8 +53,11 @@ def generate_image(prompt: str) -> bytes:
         finish_reason = getattr(candidate, "finish_reason", None)
         if finish_reason is not None:
             reason_str = str(finish_reason)
-            if reason_str in ("FinishReason.NO_IMAGE", "NO_IMAGE"):
-                raise ImageContentPolicyError("Image model refused (finish_reason=NO_IMAGE)")
+            if reason_str in (
+                "FinishReason.NO_IMAGE", "NO_IMAGE",
+                "FinishReason.IMAGE_PROHIBITED_CONTENT", "IMAGE_PROHIBITED_CONTENT",
+            ):
+                raise ImageContentPolicyError(f"Image model refused (finish_reason={reason_str})")
             if reason_str in ("FinishReason.MAX_TOKENS", "MAX_TOKENS"):
                 raise ImageTokenLimitError("Image response truncated (finish_reason=MAX_TOKENS)")
         parts = candidate.content.parts if candidate.content else []
