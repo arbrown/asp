@@ -65,8 +65,14 @@ def fetch_gutenberg_url(url: str) -> str:
             or url
         )
 
-    resp = httpx.get(url, follow_redirects=True, timeout=30)
-    resp.raise_for_status()
+    for attempt in range(2):
+        try:
+            resp = httpx.get(url, follow_redirects=True, timeout=60)
+            resp.raise_for_status()
+            break
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt == 1:
+                raise
     text = resp.text
 
     # Strip Gutenberg header and footer
