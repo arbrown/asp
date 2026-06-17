@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 from google.adk.agents import LlmAgent, LoopAgent
 from google.adk.runners import Runner
@@ -25,6 +26,8 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from storybook.agents.character_bible import character_bible_agent
+from storybook.agents.html_layout_extractor import html_layout_extractor
+from storybook.agents.html_page_verifier import html_page_verifier
 from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
@@ -253,6 +256,23 @@ async def run_pipeline(
         state.character_bible = bible_dict  # type: ignore[assignment]
         await emit("building_character_bible", 40, message="Character bible built")
 
+    # ── 4.5. Extract layout spec from session instructions ─────────────────────
+    # Always runs (cheap LLM call; config is always available regardless of resume).
+    layout_runner = _make_runner(html_layout_extractor)
+    layout_json_str = await _run_agent(
+        layout_runner,
+        f"{sid}-layout",
+        json.dumps({
+            "custom_instructions": cfg.custom_instructions or "",
+            "image_spec": cfg.image_spec or "",
+            "text_spec": cfg.text_spec or "",
+        }),
+    )
+    layout_json_str = layout_json_str.strip().removeprefix("```json").removesuffix("```").strip()
+    layout_spec: dict = json.loads(layout_json_str)
+    state.layout_spec = layout_spec
+    log.info("Layout spec: %s", layout_spec)
+
     # ── 5. Generate images per page (parallel) ────────────────────────────────
     total_pages = len(state.pages)
     image_sem = asyncio.Semaphore(settings.image_concurrency)
@@ -264,6 +284,43 @@ async def run_pipeline(
     # Maps page_number -> (img_bytes, page_text) once that page finishes successfully.
     # Used to provide the previous page's illustration and text to the validator.
     completed_pages: dict[int, tuple[bytes, str]] = {}
+
+    async def _render_and_verify_html(page_number: int, story_text: str, img_bytes: bytes) -> str:
+        """Render page HTML with layout spec and run the verifier loop (up to 2 attempts)."""
+        verifier_runner = _make_runner(html_page_verifier)
+        page_layout = dict(layout_spec)
+        page_html = ""
+        for verify_attempt in range(1, 3):
+            page_html = render_page_html(page_number, story_text, img_bytes, cfg.target_age, page_layout)
+            html_for_verify = re.sub(
+                r'src="data:image/[^;]+;base64,[^"]*"',
+                'src="[image-omitted]"',
+                page_html,
+            )
+            verify_input = json.dumps({
+                "html_code": html_for_verify,
+                "layout_spec": page_layout,
+                "original_instructions": cfg.custom_instructions or "",
+                "page_number": page_number,
+            })
+            async with llm_sem:
+                verify_result = await _run_agent(
+                    verifier_runner,
+                    f"{sid}-htmlverify-{page_number}-{verify_attempt}",
+                    verify_input,
+                )
+            if "approved" in verify_result.lower():
+                break
+            log.warning("HTML layout verification failed for page %d (attempt %d): %s",
+                        page_number, verify_attempt, verify_result[:200])
+            vsession = await verifier_runner.session_service.get_session(
+                app_name=verifier_runner.app_name,
+                user_id="pipeline",
+                session_id=f"{sid}-htmlverify-{page_number}-{verify_attempt}",
+            )
+            if vsession and vsession.state.get("corrected_image_position"):
+                page_layout = {**page_layout, "image_position": vsession.state["corrected_image_position"]}
+        return page_html
 
     async def _process_page(i: int, page: StoryPage) -> tuple[int, bytes]:
         # Resume: reuse image if it was already successfully generated
@@ -277,7 +334,7 @@ async def run_pipeline(
             pct = 40 + int(completed[0] / total_pages * 50)
             await emit("generating_image", pct, page=i, of=total_pages, message="cached")
             log.info("Resume: loaded existing image for page %d", i)
-            page_html = render_page_html(i, page.story_text, img_bytes, cfg.target_age)
+            page_html = await _render_and_verify_html(i, page.story_text, img_bytes)
             await asyncio.to_thread(gcs.write_text, sid, "pages", f"page_{i:02d}.html", content=page_html)
             return i, img_bytes
 
@@ -316,7 +373,7 @@ async def run_pipeline(
         await asyncio.to_thread(
             gcs.write_bytes, sid, "images", f"page_{i:02d}.png", data=img_bytes, content_type="image/png"
         )
-        page_html = render_page_html(i, page.story_text, img_bytes, cfg.target_age)
+        page_html = await _render_and_verify_html(i, page.story_text, img_bytes)
         await asyncio.to_thread(gcs.write_text, sid, "pages", f"page_{i:02d}.html", content=page_html)
 
         if i == 1:

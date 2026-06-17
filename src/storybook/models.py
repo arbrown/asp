@@ -59,6 +59,7 @@ class PipelineState(BaseModel):
     adapted_text: str = ""
     pages: list[StoryPage] = []
     character_bible: Optional[CharacterBible] = None
+    layout_spec: Optional[dict] = None
     image_gcs_uris: list[str] = []
     html_gcs_uris: list[str] = []
     pdf_gcs_uri: str = ""

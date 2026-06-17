@@ -10,6 +10,152 @@ from weasyprint import HTML
 
 _FONT_SIZES = {"4-5": 20, "6-8": 16, "9-12": 13}
 
+_VALID_IMAGE_POSITIONS = {"top", "bottom", "background", "left", "right"}
+
+
+def _build_page_css(layout_spec: dict) -> str:
+    """Return layout-specific CSS rules for a single story page."""
+    pos = layout_spec.get("image_position", "top")
+    if pos not in _VALID_IMAGE_POSITIONS:
+        pos = "top"
+
+    bg = layout_spec.get("background_color", "#fffdf7")
+    text_color = layout_spec.get("text_color", "#1a1a1a")
+    accent = layout_spec.get("accent_color", "#2c1a0e")
+    font = layout_spec.get("font_family", "Georgia, serif")
+
+    base = f"""
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: {font};
+    background: #e8e4dc;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 1rem;
+  }}
+  .page-number {{
+    margin-top: auto;
+    padding-top: 0.3in;
+    font-size: 10pt;
+    color: {accent};
+  }}
+  .page-text {{
+    font-size: {{{{ font_size }}}}pt;
+    line-height: 1.7;
+    text-align: center;
+    color: {text_color};
+    max-width: 6.5in;
+  }}"""
+
+    if pos == "bottom":
+        return base + f"""
+  .page {{
+    width: 8.5in;
+    min-height: 11in;
+    background: {bg};
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5in;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }}
+  .illustration {{
+    order: 2;
+    width: 100%;
+    max-height: 6.5in;
+    object-fit: contain;
+    border-radius: 8px;
+    margin-top: 0.3in;
+  }}
+  .page-text {{ order: 1; }}"""
+
+    elif pos == "background":
+        return base + f"""
+  .page {{
+    width: 8.5in;
+    min-height: 11in;
+    background: {bg};
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }}
+  .illustration {{
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 1;
+  }}
+  .text-backdrop {{
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    background: rgba(255,253,247,0.88);
+    padding: 0.3in 0.5in;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15in;
+  }}"""
+
+    elif pos in ("left", "right"):
+        direction = "row" if pos == "left" else "row-reverse"
+        return base + f"""
+  .page {{
+    width: 8.5in;
+    min-height: 11in;
+    background: {bg};
+    display: flex;
+    flex-direction: {direction};
+    align-items: stretch;
+    gap: 0.3in;
+    padding: 0.5in;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }}
+  .illustration {{
+    width: 50%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 8px;
+  }}
+  .page-text {{
+    width: 50%;
+    display: flex;
+    align-items: center;
+    text-align: left;
+  }}"""
+
+    else:  # top (default)
+        return base + f"""
+  .page {{
+    width: 8.5in;
+    min-height: 11in;
+    background: {bg};
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5in;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }}
+  .illustration {{
+    order: 1;
+    width: 100%;
+    max-height: 6.5in;
+    object-fit: contain;
+    border-radius: 8px;
+    margin-bottom: 0.3in;
+  }}
+  .page-text {{ order: 2; }}"""
+
 _PAGE_TEMPLATE = Template("""
 <!DOCTYPE html>
 <html>
@@ -104,50 +250,20 @@ _SINGLE_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: 'Georgia', serif;
-    background: #e8e4dc;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-    min-height: 100vh;
-    padding: 1rem;
-  }
-  .page {
-    width: 8.5in;
-    min-height: 11in;
-    background: #fffdf7;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 0.5in;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-  }
-  .illustration {
-    width: 100%;
-    max-height: 6.5in;
-    object-fit: contain;
-    border-radius: 8px;
-    margin-bottom: 0.3in;
-  }
-  .page-text {
-    font-size: {{ font_size }}pt;
-    line-height: 1.7;
-    text-align: center;
-    color: #1a1a1a;
-    max-width: 6.5in;
-  }
-  .page-number {
-    margin-top: auto;
-    padding-top: 0.3in;
-    font-size: 10pt;
-    color: #999;
-  }
+{{ layout_css }}
 </style>
 </head>
 <body>
 <div class="page">
+  {% if image_b64 and image_position == "background" %}
+  <img class="illustration"
+       src="data:image/png;base64,{{ image_b64 }}"
+       alt="Illustration for page {{ page_number }}">
+  <div class="text-backdrop">
+    <div class="page-text">{{ text }}</div>
+    <div class="page-number">{{ page_number }}</div>
+  </div>
+  {% else %}
   {% if image_b64 %}
   <img class="illustration"
        src="data:image/png;base64,{{ image_b64 }}"
@@ -155,6 +271,7 @@ _SINGLE_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
   {% endif %}
   <div class="page-text">{{ text }}</div>
   <div class="page-number">{{ page_number }}</div>
+  {% endif %}
 </div>
 </body>
 </html>
@@ -216,15 +333,20 @@ def render_page_html(
     story_text: str,
     image_bytes: bytes,
     target_age: str = "4-5",
+    layout_spec: dict | None = None,
 ) -> str:
     """Render a single story page as a self-contained HTML document with embedded image."""
+    spec = layout_spec or {}
     font_size = _FONT_SIZES.get(target_age, 16)
     img_b64 = base64.b64encode(image_bytes).decode() if image_bytes else ""
+    layout_css = _build_page_css(spec).replace("{{ font_size }}", str(font_size))
+    image_position = spec.get("image_position", "top")
     return _SINGLE_PAGE_TEMPLATE.render(
         page_number=page_number,
         text=story_text.replace("\n", "<br>"),
         image_b64=img_b64,
-        font_size=font_size,
+        layout_css=layout_css,
+        image_position=image_position,
     )
 
 
