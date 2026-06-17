@@ -266,6 +266,7 @@ async def run_pipeline(
             "custom_instructions": cfg.custom_instructions or "",
             "image_spec": cfg.image_spec or "",
             "text_spec": cfg.text_spec or "",
+            "total_pages": len(state.pages),
         }),
     )
     layout_json_str = layout_json_str.strip().removeprefix("```json").removesuffix("```").strip()
@@ -288,7 +289,9 @@ async def run_pipeline(
     async def _render_and_verify_html(page_number: int, story_text: str, img_bytes: bytes) -> str:
         """Render page HTML with layout spec and run the verifier loop (up to 2 attempts)."""
         verifier_runner = _make_runner(html_page_verifier)
-        page_layout = dict(layout_spec)
+        page_layouts = layout_spec.get("page_layouts", [])
+        per_page_pos = page_layouts[page_number - 1] if page_number <= len(page_layouts) else "top"
+        page_layout = {**layout_spec, "image_position": per_page_pos}
         page_html = ""
         for verify_attempt in range(1, 3):
             page_html = render_page_html(page_number, story_text, img_bytes, cfg.target_age, page_layout)
@@ -340,6 +343,8 @@ async def run_pipeline(
 
         await emit("generating_image", 40 + int(completed[0] / total_pages * 50), page=i, of=total_pages)
 
+        page_layouts = layout_spec.get("page_layouts", [])
+        target_layout = page_layouts[i - 1] if i <= len(page_layouts) else "top"
         prompt_input = json.dumps({
             "page_text": page.story_text,
             "page_instructions": page.page_instructions,
@@ -348,6 +353,7 @@ async def run_pipeline(
             "character_bible": bible_dict,
             "config": {"image_spec": cfg.image_spec},
             "is_first_page": i == 1,
+            "target_layout": target_layout,
         })
 
         prompt_runner = _make_runner(illustration_prompter)

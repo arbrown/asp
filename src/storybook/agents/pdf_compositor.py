@@ -23,6 +23,13 @@ def _md_to_html(text: str) -> str:
 _VALID_IMAGE_POSITIONS = {"top", "bottom", "background", "left", "right"}
 
 
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = h[0]*2 + h[1]*2 + h[2]*2
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
 def _build_page_css(layout_spec: dict) -> str:
     """Return layout-specific CSS rules for a single story page."""
     pos = layout_spec.get("image_position", "top")
@@ -82,6 +89,7 @@ def _build_page_css(layout_spec: dict) -> str:
   .page-text {{ order: 1; }}"""
 
     elif pos == "background":
+        r, g, b = _hex_to_rgb(bg)
         return base + f"""
   .page {{
     width: 8.5in;
@@ -109,8 +117,8 @@ def _build_page_css(layout_spec: dict) -> str:
     position: relative;
     z-index: 2;
     width: 100%;
-    background: rgba(255,253,247,0.88);
-    padding: 0.3in 0.5in;
+    background: linear-gradient(to bottom, rgba({r},{g},{b},0) 0%, rgba({r},{g},{b},0.88) 40%, rgba({r},{g},{b},0.97) 100%);
+    padding: 0.35in 0.5in 0.3in;
     display: flex;
     flex-direction: column;
     align-items: center;
