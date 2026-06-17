@@ -43,6 +43,11 @@ Read the CSS rules for `.illustration` and `.page` and apply these pass/fail rul
 DEFAULT TO APPROVING. If you are uncertain, or if the layout broadly matches the intent,
 call `approve_layout`. Only call `reject_layout` for a clear, unambiguous structural mismatch
 — e.g. the spec says "background" but the illustration has no `position: absolute`.
+
+CRITICAL — YOU MUST CALL A TOOL. Do not write a prose verdict. Do not summarize your
+conclusion in text. The pipeline ignores all text output; only tool calls are processed.
+After reading the CSS, your VERY NEXT action must be a call to either `approve_layout` or
+`reject_layout`. No exceptions.
 """
 
 

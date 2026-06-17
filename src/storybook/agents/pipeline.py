@@ -414,6 +414,7 @@ async def run_pipeline(
         pages=state.pages,
         image_bytes_list=image_bytes_list,
         target_age=cfg.target_age,
+        layout_spec=layout_spec,
     )
     state.pdf_gcs_uri = gcs.write_bytes(
         sid, "final", "storybook.pdf", data=pdf_bytes, content_type="application/pdf"

@@ -174,8 +174,127 @@ def _build_page_css(layout_spec: dict) -> str:
   }}
   .page-text {{ order: 2; }}"""
 
-_PAGE_TEMPLATE = Template("""
-<!DOCTYPE html>
+def _build_pdf_page_css(page_idx: int, layout_spec: dict, font_size: int) -> str:
+    """Return namespaced CSS for one story page in the combined PDF document."""
+    sel = f".story-page-{page_idx}"
+    pos = layout_spec.get("image_position", "top")
+    if pos not in _VALID_IMAGE_POSITIONS:
+        pos = "top"
+    bg = layout_spec.get("background_color", "#fffdf7")
+    text_color = layout_spec.get("text_color", "#1a1a1a")
+    accent = layout_spec.get("accent_color", "#2c1a0e")
+
+    base = f"""
+  {sel} .page-number {{
+    margin-top: auto;
+    padding-top: 0.3in;
+    font-size: 10pt;
+    color: {accent};
+  }}
+  {sel} .page-text {{
+    font-size: {font_size}pt;
+    line-height: 1.7;
+    color: {text_color};
+    max-width: 6.5in;
+  }}"""
+
+    if pos == "bottom":
+        return base + f"""
+  {sel} {{
+    background: {bg};
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5in;
+  }}
+  {sel} .illustration {{
+    order: 2;
+    width: 100%;
+    max-height: 6.5in;
+    object-fit: contain;
+    border-radius: 8px;
+    margin-top: 0.3in;
+  }}
+  {sel} .page-text {{ order: 1; text-align: center; }}"""
+
+    elif pos == "background":
+        r, g, b = _hex_to_rgb(bg)
+        return base + f"""
+  {sel} {{
+    background: {bg};
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0;
+  }}
+  {sel} .illustration {{
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    z-index: 1;
+  }}
+  {sel} .text-backdrop {{
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    background: linear-gradient(to bottom, rgba({r},{g},{b},0) 0%, rgba({r},{g},{b},0.88) 40%, rgba({r},{g},{b},0.97) 100%);
+    padding: 0.35in 0.5in 0.3in;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15in;
+  }}
+  {sel} .page-text {{ text-align: center; }}"""
+
+    elif pos in ("left", "right"):
+        direction = "row" if pos == "left" else "row-reverse"
+        return base + f"""
+  {sel} {{
+    background: {bg};
+    display: flex;
+    flex-direction: {direction};
+    align-items: stretch;
+    gap: 0.3in;
+    padding: 0.5in;
+  }}
+  {sel} .illustration {{
+    width: 50%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 8px;
+  }}
+  {sel} .page-text {{
+    width: 50%;
+    display: flex;
+    align-items: center;
+    text-align: left;
+  }}"""
+
+    else:  # top (default)
+        return base + f"""
+  {sel} {{
+    background: {bg};
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5in;
+  }}
+  {sel} .illustration {{
+    order: 1;
+    width: 100%;
+    max-height: 6.5in;
+    object-fit: contain;
+    border-radius: 8px;
+    margin-bottom: 0.3in;
+  }}
+  {sel} .page-text {{ order: 2; text-align: center; }}"""
+
+
+_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -185,70 +304,58 @@ _PAGE_TEMPLATE = Template("""
     margin: 0;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Georgia', serif; background: #fffdf7; }
+  body { font-family: {{ font_family }}; }
 
   .page {
     width: 8.5in;
     height: 11in;
     page-break-after: always;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 0.5in;
   }
 
-  /* Cover page */
-  .page.cover {
+  /* Cover */
+  .cover {
+    display: flex;
+    flex-direction: column;
     justify-content: center;
-    background: #f5efe0;
+    align-items: center;
+    background: {{ cover_bg }};
   }
   .cover-title {
     font-size: 48pt;
     font-weight: bold;
     text-align: center;
-    color: #2c1a0e;
+    color: {{ text_color }};
     margin-bottom: 0.3in;
     line-height: 1.2;
   }
   .cover-author {
     font-size: 18pt;
-    color: #5c3d1e;
+    color: {{ accent_color }};
     text-align: center;
   }
 
-  /* Story pages */
-  .page.story .illustration {
-    width: 100%;
-    max-height: 6.5in;
-    object-fit: contain;
-    border-radius: 8px;
-    margin-bottom: 0.3in;
-  }
-  .page.story .page-text {
-    font-size: {{ font_size }}pt;
-    line-height: 1.7;
-    text-align: center;
-    color: #1a1a1a;
-    max-width: 6.5in;
-  }
-  .page-number {
-    margin-top: auto;
-    font-size: 10pt;
-    color: #999;
-  }
+  /* Per-page story styles (namespaced by .story-page-N) */
+  {{ per_page_css }}
 </style>
 </head>
 <body>
 
-<!-- Cover -->
 <div class="page cover">
   <div class="cover-title">{{ title }}</div>
   <div class="cover-author">Adapted from {{ author }}</div>
 </div>
 
-<!-- Story pages -->
 {% for page in pages %}
-<div class="page story">
+<div class="page story-page story-page-{{ loop.index }}">
+  {% if page.image_b64 and page.image_position == "background" %}
+  <img class="illustration"
+       src="data:image/png;base64,{{ page.image_b64 }}"
+       alt="Illustration for page {{ loop.index }}">
+  <div class="text-backdrop">
+    <div class="page-text">{{ page.text }}</div>
+    <div class="page-number">{{ loop.index }}</div>
+  </div>
+  {% else %}
   {% if page.image_b64 %}
   <img class="illustration"
        src="data:image/png;base64,{{ page.image_b64 }}"
@@ -256,6 +363,7 @@ _PAGE_TEMPLATE = Template("""
   {% endif %}
   <div class="page-text">{{ page.text }}</div>
   <div class="page-number">{{ loop.index }}</div>
+  {% endif %}
 </div>
 {% endfor %}
 
@@ -379,6 +487,7 @@ def compose_pdf(
     pages: list,
     image_bytes_list: list[bytes],
     target_age: str = "4-5",
+    layout_spec: dict | None = None,
 ) -> bytes:
     """
     Render a storybook PDF from StoryPage objects and illustration bytes.
@@ -389,26 +498,47 @@ def compose_pdf(
         pages: List of StoryPage objects (only story_text is printed).
         image_bytes_list: List of PNG bytes (one per page; may be shorter than pages).
         target_age: Used to set font size.
+        layout_spec: Layout/typography spec from html_layout_extractor (page_layouts, fonts, colors).
 
     Returns:
         PDF as bytes.
     """
+    spec = layout_spec or {}
     font_size = _FONT_SIZES.get(target_age, 16)
+    page_layouts_list = spec.get("page_layouts", [])
+    font = spec.get("font_family", "Georgia, serif")
+    bg = spec.get("background_color", "#fffdf7")
+    text_color = spec.get("text_color", "#1a1a1a")
+    accent = spec.get("accent_color", "#2c1a0e")
+
+    per_page_css = ""
+    for i in range(1, len(pages) + 1):
+        pos = page_layouts_list[i - 1] if i <= len(page_layouts_list) else "top"
+        page_spec = {**spec, "image_position": pos}
+        per_page_css += _build_pdf_page_css(i, page_spec, font_size)
 
     page_data = []
-    for i, page in enumerate(pages):
+    for i, page in enumerate(pages, 1):
         img_b64 = ""
-        if i < len(image_bytes_list) and image_bytes_list[i]:
-            img_b64 = base64.b64encode(image_bytes_list[i]).decode()
-        # Use only story_text — page_instructions are never printed
+        if i <= len(image_bytes_list) and image_bytes_list[i - 1]:
+            img_b64 = base64.b64encode(image_bytes_list[i - 1]).decode()
         text = page.story_text if hasattr(page, "story_text") else str(page)
-        page_data.append({"text": _md_to_html(text).replace("\n", "<br>"), "image_b64": img_b64})
+        pos = page_layouts_list[i - 1] if i <= len(page_layouts_list) else "top"
+        page_data.append({
+            "text": _md_to_html(text).replace("\n", "<br>"),
+            "image_b64": img_b64,
+            "image_position": pos,
+        })
 
-    html_content = _PAGE_TEMPLATE.render(
+    html_content = _PDF_TEMPLATE.render(
         title=title,
         author=author,
         pages=page_data,
-        font_size=font_size,
+        font_family=font,
+        cover_bg=bg,
+        text_color=text_color,
+        accent_color=accent,
+        per_page_css=per_page_css,
     )
 
     return HTML(string=html_content).write_pdf()
