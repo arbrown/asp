@@ -56,18 +56,41 @@ ART STYLES — be HIGHLY specific, pick something unexpected:
 - Naive/outsider folk art, flattened perspective, pure unmixed colors, pattern fills
 - 1970s psychedelic, surreal scale, organic lettering, impossible architecture
 
-CUSTOM INSTRUCTIONS must include 2-3 FUN RULES chosen from:
-- A character always wears or carries one very specific item visible in every scene
-- A character has a verbal catchphrase they say under pressure (quote it)
-- Every page hides a specific small object for the reader to find (name it)
-- A particular animal appears in the background of every spread (name it)
-- One character communicates only through humming or gestures
-- A specific color appears in a meaningful pattern across pages
-- A character secretly counts objects and the count continues across pages
-- Tiny handwritten notes or letters are hidden in the illustrations
+PAGE LAYOUT & TYPOGRAPHY — pick one layout and one typography direction and work them into image_spec:
+Layouts (pick one):
+- Full-bleed illustration as page background with the story text in a semi-transparent panel at the bottom
+- Illustration fills the top two-thirds; text sits beneath in a clean band
+- Illustration occupies the left half; text runs in a narrow column on the right
+- Text floats at the top of the page; illustration fills everything below
+- Illustration on the right half; text on the left in a contrasting color band
+
+Typography & color (pick one):
+- Deep jewel-tone page (navy, forest, burgundy) with white or cream text
+- Warm sepia/parchment background with ink-brown text; aged-paper feel
+- High-contrast black page with bright single-color illustration accents and white text
+- Pastel ground with a bold decorative display font for the story text
+- Cream background with a tall elegant serif; subtle colored drop caps on first word of each page
+- Kraft paper texture, hand-lettered style text, earthy palette
+- Bright white with a single vivid accent color used consistently for text highlights
+
+CUSTOM INSTRUCTIONS — vary the approach each time. Do NOT default to a recurring motif on every page. \
+Choose ONE of these strategies at random:
+
+Strategy A (no motif — pure story focus): Give 2-3 sentences that define the emotional arc, \
+the narrative voice, and which part of the source work to foreground. No recurring visual gimmick.
+
+Strategy B (one light motif): A single subtle recurring element — a color, an animal glimpsed in the \
+background, or an object that appears on a few (not all) pages when it fits naturally. Plus a story-focus sentence.
+
+Strategy C (one strong motif): One vivid, specific rule that shapes every spread: a character catchphrase \
+(quote it), a hidden object (name it precisely), or an ongoing count. Keep it to one rule only.
+
+Strategy D (character voice + story arc): Define one character's distinctive personality or speech \
+pattern, then give the emotional beats the adaptation should hit across its pages.
 
 Be bold, specific, and surprising — pick something the user would never have thought of themselves. \
-Mix unexpected source+style pairings (e.g. Moby Dick in Byzantine mosaic; Aesop in Soviet propaganda style).
+Mix unexpected source+style pairings (e.g. Moby Dick in Byzantine mosaic; Aesop in Soviet propaganda style). \
+Actively avoid combinations you may have generated before.
 
 Return JSON with these exact fields:
 - title: exact title as it appears on Project Gutenberg
@@ -75,8 +98,9 @@ Return JSON with these exact fields:
 - target_age: one of "4-5", "6-8", or "9-12" (match to source complexity)
 - page_count: integer between 10 and 20
 - text_spec: literary/narrative form for the adaptation (1-3 sentences, or empty string for prose)
-- image_spec: exactly 2-3 sentences, hyper-specific art direction
-- custom_instructions: exactly 2-4 sentences with character rules and story focus
+- image_spec: exactly 2-3 sentences — hyper-specific art direction PLUS the chosen page layout \
+  and typography direction woven in naturally
+- custom_instructions: 2-4 sentences using whichever strategy you chose above
 """
 
 
