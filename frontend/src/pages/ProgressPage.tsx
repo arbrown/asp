@@ -8,8 +8,8 @@ const MIN_DISPLAY_MS = 5000;
 const STAGE_LABELS: Record<string, string> = {
   fetching: "Fetching source text",
   adapting_text: "Adapting story for children",
-  splitting_pages: "Splitting into pages",
   building_character_bible: "Building character bible",
+  planning_spreads: "Planning spread layouts",
   generating_image: "Generating illustrations",
   image_retry: "Retrying illustration",
   composing_pdf: "Composing PDF",
@@ -39,8 +39,8 @@ export default function ProgressPage() {
     setCfSnap({ ...cfRef.current });
   }
 
-  function tryShowImage(pageNumber: number) {
-    const url = `${BASE}/sessions/${id}/images/${pageNumber}`;
+  function tryShowImage(spreadNumber: number) {
+    const url = `${BASE}/sessions/${id}/spreads/${spreadNumber}/image/0`;
     const { slotA, slotB, front, shownSince } = cfRef.current;
     const hasImage = slotA !== null || slotB !== null;
     const elapsed = Date.now() - shownSince;
@@ -81,8 +81,8 @@ export default function ProgressPage() {
         setEvents((prev) => [...prev, e]);
         setPct(e.pct);
         setStage(e.stage);
-        if (e.stage === "generating_image" && (e.message === "done" || e.message === "cached") && e.page) {
-          tryShowImage(e.page);
+        if (e.stage === "generating_image" && (e.message === "done" || e.message === "cached") && e.spread != null) {
+          tryShowImage(e.spread);
         }
         if (e.stage === "done") {
           setDone(true);
@@ -150,7 +150,7 @@ export default function ProgressPage() {
 
         {/* Right: image preview */}
         <div className="w-80 shrink-0 sticky top-8">
-          <div className="relative aspect-square rounded-2xl overflow-hidden bg-sepia-50 border border-sepia-200 shadow-sm">
+          <div className="relative rounded-2xl overflow-hidden bg-sepia-50 border border-sepia-200 shadow-sm" style={{ aspectRatio: "17/11" }}>
             {!hasImage && (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-sepia-400 gap-3">
                 <svg className="w-12 h-12 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -202,7 +202,8 @@ function EventLine({ event: e }: { event: ProgressEvent }) {
   const cls = isError ? "text-red-600" : isRetry ? "text-amber-600" : "text-sepia-700";
 
   let text = `[${e.pct}%] ${STAGE_LABELS[e.stage] ?? e.stage}`;
-  if (e.page) text += ` — page ${e.page}${e.of ? `/${e.of}` : ""}`;
+  if (e.spread != null) text += ` — spread ${e.spread}${e.of ? `/${e.of}` : ""}`;
+  else if (e.page) text += ` — page ${e.page}${e.of ? `/${e.of}` : ""}`;
   if (e.attempt) text += ` (attempt ${e.attempt})`;
   if (e.message && e.message !== "done" && e.message !== "cached") text += `: ${e.message}`;
   if (e.reason) text += ` — ${e.reason}`;

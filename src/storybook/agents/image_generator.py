@@ -24,12 +24,20 @@ def _client() -> genai.Client:
     )
 
 
-def generate_image(prompt: str) -> bytes:
+_ASPECT_RATIO_GUIDANCE: dict[str, str] = {
+    "16:9": "wide panoramic landscape composition, horizontal orientation, 16:9 aspect ratio",
+    "3:4": "portrait composition, vertical orientation, 3:4 aspect ratio",
+    "1:1": "square composition, 1:1 aspect ratio",
+}
+
+
+def generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
     """
     Generate a single illustration using Nano Banana 2.
 
     Args:
         prompt: The image generation prompt (from IllustrationPrompter).
+        aspect_ratio: Target aspect ratio string — "16:9", "3:4", or "1:1".
 
     Returns:
         Raw PNG image bytes.
@@ -38,10 +46,13 @@ def generate_image(prompt: str) -> bytes:
         ImageContentPolicyError: if the model refuses due to safety filters.
         RuntimeError: for any other failure.
     """
+    guidance = _ASPECT_RATIO_GUIDANCE.get(aspect_ratio, "")
+    full_prompt = f"[{guidance}] {prompt}" if guidance else prompt
+
     client = _client()
     response = client.models.generate_content(
         model=settings.model_image,
-        contents=prompt,
+        contents=full_prompt,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
         ),

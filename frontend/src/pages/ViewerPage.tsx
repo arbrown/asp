@@ -20,11 +20,11 @@ export default function ViewerPage() {
   const isReady = session.current_stage === "done" && session.pdf_signed_url;
   const title = session.config?.source?.title || "Your Storybook";
   const author = session.config?.source?.author;
-  const coverUrl = `${BASE}/sessions/${id}/images/1`;
+  const coverUrl = `${BASE}/sessions/${id}/spreads/0/image/0`;
 
   return (
     <div className="max-w-2xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-start justify-between mb-8 gap-4">
         <div>
           <h1 className="text-2xl font-serif font-bold text-sepia-900">{title}</h1>
           {author && (
@@ -33,13 +33,22 @@ export default function ViewerPage() {
           <p className="text-xs font-mono text-sepia-500 mt-1">{id}</p>
         </div>
         {isReady && (
-          <a
-            href={session.pdf_signed_url}
-            download
-            className="bg-sepia-900 text-parchment px-5 py-2.5 rounded-lg hover:bg-sepia-600 transition-colors text-sm shrink-0"
-          >
-            Download PDF
-          </a>
+          <div className="flex gap-2 shrink-0">
+            <a
+              href={session.wide_pdf_url ?? session.pdf_signed_url ?? ""}
+              download
+              className="bg-sepia-900 text-parchment px-4 py-2.5 rounded-lg hover:bg-sepia-600 transition-colors text-sm"
+            >
+              Wide PDF
+            </a>
+            <a
+              href={session.pdf_signed_url ?? ""}
+              download
+              className="bg-sepia-700 text-parchment px-4 py-2.5 rounded-lg hover:bg-sepia-500 transition-colors text-sm"
+            >
+              Print PDF
+            </a>
+          </div>
         )}
       </div>
 

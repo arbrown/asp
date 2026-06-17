@@ -38,6 +38,26 @@ class StoryPage(BaseModel):
     page_instructions: str = ""  # Scene notes for the illustrator, never printed
 
 
+class IllustrationEntry(BaseModel):
+    image_index: int          # 0 or 1 within a spread
+    coverage: str             # "full" | "verso" | "recto"
+    aspect_ratio: str         # "16:9" | "3:4" | "1:1"
+    illustration_notes: str
+
+
+class SpreadContent(BaseModel):
+    spread_number: int
+    verso_text: Optional[str] = None
+    verso_instructions: Optional[str] = None
+    recto_text: Optional[str] = None
+    recto_instructions: Optional[str] = None
+
+
+class SpreadPlan(BaseModel):
+    spread_number: int
+    illustration_plan: list[IllustrationEntry] = []
+
+
 class CharacterBible(BaseModel):
     style: str
     palette: list[str] = []
@@ -60,9 +80,12 @@ class PipelineState(BaseModel):
     pages: list[StoryPage] = []
     character_bible: Optional[CharacterBible] = None
     layout_spec: Optional[dict] = None
+    spread_contents: list[SpreadContent] = []
+    spread_plans: list[SpreadPlan] = []
     image_gcs_uris: list[str] = []
     html_gcs_uris: list[str] = []
     pdf_gcs_uri: str = ""
+    wide_pdf_gcs_uri: str = ""
 
     current_stage: str = "initializing"
     progress_pct: int = 0

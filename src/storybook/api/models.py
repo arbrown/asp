@@ -17,6 +17,7 @@ class SessionResponse(BaseModel):
     progress_pct: int
     config: Optional[SessionConfig] = None
     pdf_signed_url: Optional[str] = None
+    wide_pdf_url: Optional[str] = None
     errors: list[str] = []
     resumable: bool = False
 
@@ -26,6 +27,7 @@ class ProgressEvent(BaseModel):
     stage: str
     pct: int
     message: Optional[str] = None
+    spread: Optional[int] = None
     page: Optional[int] = None
     of: Optional[int] = None
     signed_url: Optional[str] = None

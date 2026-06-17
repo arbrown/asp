@@ -120,3 +120,36 @@ def load_pages(session_id: str) -> list:
 
 def load_character_bible(session_id: str) -> dict:
     return json.loads(read_text(session_id, "character_bible.json"))
+
+
+# ── Spread helpers ─────────────────────────────────────────────────────────────
+
+def spread_image_exists(session_id: str, spread_number: int, img_index: int = 0) -> bool:
+    key = _blob_path(session_id, "images", f"spread_{spread_number:02d}_img{img_index}.png")
+    return _bucket().blob(key).exists()
+
+
+def load_spread_image_bytes(session_id: str, spread_number: int, img_index: int = 0) -> bytes:
+    return read_bytes(session_id, "images", f"spread_{spread_number:02d}_img{img_index}.png")
+
+
+def spread_html_exists(session_id: str, spread_number: int) -> bool:
+    key = _blob_path(session_id, "spreads", f"spread_{spread_number:02d}.html")
+    return _bucket().blob(key).exists()
+
+
+def load_spread_html(session_id: str, spread_number: int) -> str:
+    return read_text(session_id, "spreads", f"spread_{spread_number:02d}.html")
+
+
+def load_spread_contents(session_id: str) -> list:
+    """Return list[SpreadContent] for all spreads stored as JSON in GCS."""
+    from storybook.models import SpreadContent
+    bucket = _bucket()
+    prefix = _blob_path(session_id, "spreads") + "/"
+    blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
+    return [
+        SpreadContent(**json.loads(b.download_as_text()))
+        for b in blobs
+        if b.name.endswith(".json")
+    ]

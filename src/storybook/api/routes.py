@@ -168,6 +168,7 @@ def _session_meta(state: PipelineState) -> dict:
         "current_stage": state.current_stage,
         "progress_pct": state.progress_pct,
         "pdf_gcs_uri": state.pdf_gcs_uri,
+        "wide_pdf_gcs_uri": state.wide_pdf_gcs_uri,
         "errors": state.errors,
     }
 
@@ -257,6 +258,7 @@ async def get_session(session_id: str) -> SessionResponse:
         progress_pct=state.progress_pct,
         config=state.config,
         pdf_signed_url=f"/api/v1/sessions/{session_id}/pdf" if state.pdf_gcs_uri else None,
+        wide_pdf_url=f"/api/v1/sessions/{session_id}/pdf/wide" if state.wide_pdf_gcs_uri else None,
         errors=state.errors,
         resumable=state.current_stage == "error",
     )
@@ -305,6 +307,53 @@ async def download_pdf(session_id: str) -> Response:
         content=data,
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="storybook-{session_id[:8]}.pdf"'},
+    )
+
+
+@router.get("/sessions/{session_id}/spreads/{spread_number}/html")
+async def get_spread_html(session_id: str, spread_number: int) -> Response:
+    if session_id not in _sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        data = gcs.read_bytes(session_id, "spreads", f"spread_{spread_number:02d}.html")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Spread HTML not ready")
+    return Response(
+        content=data,
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/sessions/{session_id}/spreads/{spread_number}/image/{image_index}")
+async def get_spread_image(session_id: str, spread_number: int, image_index: int) -> Response:
+    if session_id not in _sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        data, _ = gcs.read_blob(
+            session_id, "images", f"spread_{spread_number:02d}_img{image_index}.png"
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Spread image not ready")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/sessions/{session_id}/pdf/wide")
+async def download_wide_pdf(session_id: str) -> Response:
+    state = _sessions.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not state.wide_pdf_gcs_uri:
+        raise HTTPException(status_code=404, detail="Wide PDF not ready")
+    data, content_type = gcs.read_blob(session_id, "final", "storybook_wide.pdf")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="storybook-wide-{session_id[:8]}.pdf"'},
     )
 
 

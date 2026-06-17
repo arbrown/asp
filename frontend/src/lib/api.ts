@@ -22,6 +22,7 @@ export interface SessionSummary {
   progress_pct: number;
   config?: SessionConfig;
   pdf_signed_url?: string;
+  wide_pdf_url?: string;
   errors: string[];
   resumable?: boolean;
 }
@@ -30,6 +31,7 @@ export interface ProgressEvent {
   stage: string;
   pct: number;
   message?: string;
+  spread?: number;
   page?: number;
   of?: number;
   signed_url?: string;
