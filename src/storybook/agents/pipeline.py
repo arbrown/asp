@@ -341,6 +341,11 @@ async def run_pipeline(
     ) -> str:
         verifier_runner = _make_runner(html_page_verifier)
         spread_html = ""
+        accumulated_overrides: dict = {}
+        # Pass the first image to verifier so it can judge actual legibility
+        primary_img_bytes = image_bytes_by_index.get(0) or image_bytes_by_index.get(1)
+        secondary_img_bytes = image_bytes_by_index.get(1) if 0 in image_bytes_by_index else None
+
         for verify_attempt in range(1, 3):
             spread_html = render_spread_html(
                 spread_number=spread_number,
@@ -350,6 +355,7 @@ async def run_pipeline(
                 image_bytes_by_index=image_bytes_by_index,
                 layout_spec=layout_spec,
                 target_age=cfg.target_age,
+                css_overrides=accumulated_overrides if accumulated_overrides else None,
             )
             html_for_verify = re.sub(
                 r'src="data:image/[^;]+;base64,[^"]*"',
@@ -368,6 +374,8 @@ async def run_pipeline(
                     verifier_runner,
                     f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
                     verify_input,
+                    subject_image=primary_img_bytes,
+                    reference_image=secondary_img_bytes,
                 )
             if "approved" in verify_result.lower():
                 break
@@ -375,6 +383,21 @@ async def run_pipeline(
                 "Spread HTML layout verification failed for spread %d (attempt %d): %s",
                 spread_number, verify_attempt, verify_result[:200],
             )
+            vsession = await verifier_runner.session_service.get_session(
+                app_name=verifier_runner.app_name,
+                user_id="pipeline",
+                session_id=f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
+            )
+            if vsession:
+                new_overrides = vsession.state.get("layout_css_overrides") or {}
+                if isinstance(new_overrides, dict):
+                    accumulated_overrides.update(new_overrides)
+                    log.info(
+                        "Spread %d verifier feedback: %s → applying overrides: %s",
+                        spread_number,
+                        vsession.state.get("layout_feedback", "")[:120],
+                        accumulated_overrides,
+                    )
         return spread_html
 
     async def _process_spread(spread_content: SpreadContent) -> tuple[int, dict[int, bytes]]:

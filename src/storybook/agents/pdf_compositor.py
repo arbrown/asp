@@ -523,23 +523,37 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
     position: absolute;
     bottom: 0; left: 0; right: 0;
     z-index: 2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.88) 40%, rgba({{ bg_rgb }},0.97) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
     padding: 0.35in 0.5in 0.3in;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.1in;
   }
+  .text-backdrop .page-text {
+    color: #ffffff;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  }
+  .text-backdrop .page-number {
+    color: rgba(255,255,255,0.75);
+  }
   .text-over-image {
     position: absolute;
     bottom: 0; left: 0; right: 0;
     z-index: 2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.85) 35%, rgba({{ bg_rgb }},0.96) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
     padding: 0.3in 0.4in 0.25in;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.1in;
+  }
+  .text-over-image .page-text {
+    color: #ffffff;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  }
+  .text-over-image .page-number {
+    color: rgba(255,255,255,0.75);
   }
   .gutter-line {
     position: absolute;
@@ -684,16 +698,20 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index:3; margin-top: auto; padding-top: 0.2in; }
   .text-backdrop {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.88) 40%, rgba({{ bg_rgb }},0.97) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
     padding: 0.35in 0.5in 0.3in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
+  .text-backdrop .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  .text-backdrop .page-number { color: rgba(255,255,255,0.75); }
   .text-over-image {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.85) 35%, rgba({{ bg_rgb }},0.96) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
     padding: 0.3in 0.4in 0.25in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
+  .text-over-image .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  .text-over-image .page-number { color: rgba(255,255,255,0.75); }
   .cover-half {
     display: flex; flex-direction: column; justify-content: center; align-items: center;
   }
@@ -806,16 +824,20 @@ _PUBLISHING_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index: 3; margin-top: auto; padding-top: 0.2in; }
   .text-backdrop {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.88) 40%, rgba({{ bg_rgb }},0.97) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
     padding: 0.35in 0.5in 0.3in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
+  .text-backdrop .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  .text-backdrop .page-number { color: rgba(255,255,255,0.75); }
   .text-over-image {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba({{ bg_rgb }},0) 0%, rgba({{ bg_rgb }},0.85) 35%, rgba({{ bg_rgb }},0.96) 100%);
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
     padding: 0.3in 0.4in 0.25in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
+  .text-over-image .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  .text-over-image .page-number { color: rgba(255,255,255,0.75); }
   .cover-title { font-size: 42pt; font-weight: bold; text-align: center; color: {{ text_color }}; margin-bottom: 0.3in; line-height: 1.2; }
   .cover-author { font-size: 16pt; color: {{ accent_color }}; text-align: center; }
 </style>
@@ -909,10 +931,17 @@ def render_spread_html(
     image_bytes_by_index: dict[int, bytes],
     layout_spec: dict,
     target_age: str = "4-5",
+    css_overrides: dict | None = None,
 ) -> str:
-    """Render a two-page spread as a self-contained 17×11 HTML document with embedded images."""
+    """Render a two-page spread as a self-contained 17×11 HTML document with embedded images.
+
+    css_overrides keys (from verifier feedback):
+      font_size_scale: float — multiply base font size (e.g. 1.3)
+    """
     spec = layout_spec or {}
-    font_size = _FONT_SIZES.get(target_age, 16)
+    overrides = css_overrides or {}
+    base_font_size = _FONT_SIZES.get(target_age, 16)
+    font_size = int(base_font_size * overrides.get("font_size_scale", 1.0))
     bg = spec.get("background_color", "#fffdf7")
     r, g, b = _hex_to_rgb(bg)
     ctx = _build_spread_context(
