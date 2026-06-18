@@ -56,6 +56,7 @@ class SpreadContent(BaseModel):
 class SpreadPlan(BaseModel):
     spread_number: int
     illustration_plan: list[IllustrationEntry] = []
+    text_treatment: str = "gradient_dark"  # "gradient_dark" | "gradient_light" | "direct"
 
 
 class CharacterBible(BaseModel):

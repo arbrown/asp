@@ -30,6 +30,52 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _get_overlay_styles(text_treatment: str, text_color: str, bg_rgb: str) -> dict:
+    """Compute per-spread overlay CSS values from the planner's chosen text treatment."""
+    if text_treatment == "gradient_light":
+        backdrop = (
+            f"linear-gradient(to bottom, rgba({bg_rgb},0) 0%,"
+            f" rgba({bg_rgb},0.88) 40%, rgba({bg_rgb},0.97) 100%)"
+        )
+        text_inline = f"color: {text_color};"
+        num_inline = ""
+        css_block = (
+            f".text-backdrop .page-text, .text-over-image .page-text"
+            f" {{ color: {text_color}; }}"
+        )
+    elif text_treatment == "direct":
+        backdrop = "transparent"
+        text_inline = (
+            f"color: {text_color};"
+            " text-shadow: 0 1px 8px rgba(0,0,0,0.9), 0 0 24px rgba(0,0,0,0.6);"
+        )
+        num_inline = ""
+        css_block = (
+            f".text-backdrop .page-text, .text-over-image .page-text"
+            f" {{ color: {text_color};"
+            " text-shadow: 0 1px 8px rgba(0,0,0,0.9), 0 0 24px rgba(0,0,0,0.6); }"
+        )
+    else:  # "gradient_dark" — default, reliable for most images
+        backdrop = (
+            "linear-gradient(to bottom,"
+            " rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%)"
+        )
+        text_inline = "color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6);"
+        num_inline = "color: rgba(255,255,255,0.75);"
+        css_block = (
+            ".text-backdrop .page-text, .text-over-image .page-text"
+            " { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }\n"
+            "  .text-backdrop .page-number, .text-over-image .page-number"
+            " { color: rgba(255,255,255,0.75); }"
+        )
+    return {
+        "overlay_backdrop": backdrop,
+        "overlay_text_inline": text_inline,
+        "overlay_num_inline": num_inline,
+        "overlay_css_block": css_block,
+    }
+
+
 def _build_page_css(layout_spec: dict) -> str:
     """Return layout-specific CSS rules for a single story page."""
     pos = layout_spec.get("image_position", "top")
@@ -523,38 +569,25 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
     position: absolute;
     bottom: 0; left: 0; right: 0;
     z-index: 2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
+    background: {{ overlay_backdrop }};
     padding: 0.35in 0.5in 0.3in;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.1in;
   }
-  .text-backdrop .page-text {
-    color: #ffffff;
-    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
-  }
-  .text-backdrop .page-number {
-    color: rgba(255,255,255,0.75);
-  }
   .text-over-image {
     position: absolute;
     bottom: 0; left: 0; right: 0;
     z-index: 2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
+    background: {{ overlay_backdrop }};
     padding: 0.3in 0.4in 0.25in;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.1in;
   }
-  .text-over-image .page-text {
-    color: #ffffff;
-    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
-  }
-  .text-over-image .page-number {
-    color: rgba(255,255,255,0.75);
-  }
+  {{ overlay_css_block }}
   .gutter-line {
     position: absolute;
     top: 0; bottom: 0;
@@ -698,20 +731,14 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index:3; margin-top: auto; padding-top: 0.2in; }
   .text-backdrop {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
     padding: 0.35in 0.5in 0.3in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
-  .text-backdrop .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
-  .text-backdrop .page-number { color: rgba(255,255,255,0.75); }
   .text-over-image {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
     padding: 0.3in 0.4in 0.25in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
-  .text-over-image .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
-  .text-over-image .page-number { color: rgba(255,255,255,0.75); }
   .cover-half {
     display: flex; flex-direction: column; justify-content: center; align-items: center;
   }
@@ -735,10 +762,10 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 {% if s.coverage == "full" %}
   <img class="full-bleed-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Spread {{ s.spread_number }}">
   <div class="half-page verso" style="justify-content:flex-end; padding:0;">
-    {% if s.verso_text %}<div class="text-backdrop"><div class="page-text">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.verso_text %}<div class="text-backdrop" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
   <div class="half-page" style="justify-content:flex-end; padding:0;">
-    {% if s.recto_text %}<div class="text-backdrop"><div class="page-text">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.recto_text %}<div class="text-backdrop" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
 {% elif s.coverage == "verso" %}
   <div class="half-page verso" style="padding:0;">
@@ -759,11 +786,11 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 {% elif s.coverage == "dual" %}
   <div class="half-page verso" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Left illustration">
-    {% if s.verso_text %}<div class="text-over-image"><div class="page-text">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.verso_text %}<div class="text-over-image" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
   <div class="half-page" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[1] }}" alt="Right illustration">
-    {% if s.recto_text %}<div class="text-over-image"><div class="page-text">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.recto_text %}<div class="text-over-image" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
 {% else %}
   <div class="half-page verso">
@@ -824,20 +851,14 @@ _PUBLISHING_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index: 3; margin-top: auto; padding-top: 0.2in; }
   .text-backdrop {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%);
     padding: 0.35in 0.5in 0.3in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
-  .text-backdrop .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
-  .text-backdrop .page-number { color: rgba(255,255,255,0.75); }
   .text-over-image {
     position: absolute; bottom:0; left:0; right:0; z-index:2;
-    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.68) 35%, rgba(0,0,0,0.88) 100%);
     padding: 0.3in 0.4in 0.25in;
     display: flex; flex-direction: column; align-items: center; gap: 0.1in;
   }
-  .text-over-image .page-text { color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
-  .text-over-image .page-number { color: rgba(255,255,255,0.75); }
   .cover-title { font-size: 42pt; font-weight: bold; text-align: center; color: {{ text_color }}; margin-bottom: 0.3in; line-height: 1.2; }
   .cover-author { font-size: 16pt; color: {{ accent_color }}; text-align: center; }
 </style>
@@ -854,16 +875,16 @@ _PUBLISHING_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 <div class="portrait-page" style="{% if not p.has_content %}justify-content: center; align-items: center;{% endif %}">
 {% if p.page_type == "full_verso" %}
   <img class="full-bleed-img-left" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-backdrop"><div class="page-text">{{ p.text }}</div>{% if p.page_num %}<div class="page-number">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-backdrop" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% elif p.page_type == "full_recto" %}
   <img class="full-bleed-img-right" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-backdrop"><div class="page-text">{{ p.text }}</div>{% if p.page_num %}<div class="page-number">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-backdrop" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% elif p.page_type == "image_only" %}
   <img class="portrait-img" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
   {% if p.page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;z-index:3;">{{ p.page_num }}</div>{% endif %}
 {% elif p.page_type == "image_with_text" %}
   <img class="portrait-img" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-over-image"><div class="page-text">{{ p.text }}</div>{% if p.page_num %}<div class="page-number">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-over-image" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% else %}
   {% if p.text %}<div class="page-text">{{ p.text }}</div>{% endif %}
   {% if p.page_num %}<div class="page-number">{{ p.page_num }}</div>{% endif %}
@@ -893,11 +914,15 @@ def _build_spread_context(
     image_bytes_by_index: dict[int, bytes],
     layout_spec: dict,
     font_size: int,
+    text_treatment: str = "gradient_dark",
 ) -> dict:
     """Build a template context dict describing one spread's layout and content."""
     bg = layout_spec.get("background_color", "#fffdf7")
+    text_color = layout_spec.get("text_color", "#1a1a1a")
     r, g, b = _hex_to_rgb(bg)
+    bg_rgb = f"{r},{g},{b}"
     verso_num, recto_num = _spread_page_numbers(spread_number)
+    overlay = _get_overlay_styles(text_treatment, text_color, bg_rgb)
 
     images: dict[int, str] = {}
     for idx, data in image_bytes_by_index.items():
@@ -919,7 +944,8 @@ def _build_spread_context(
         "verso_page_num": verso_num,
         "recto_page_num": recto_num,
         "font_size": font_size,
-        "bg_rgb": f"{r},{g},{b}",
+        "bg_rgb": bg_rgb,
+        **overlay,
     }
 
 
@@ -932,14 +958,17 @@ def render_spread_html(
     layout_spec: dict,
     target_age: str = "4-5",
     css_overrides: dict | None = None,
+    text_treatment: str = "gradient_dark",
 ) -> str:
     """Render a two-page spread as a self-contained 17×11 HTML document with embedded images.
 
     css_overrides keys (from verifier feedback):
       font_size_scale: float — multiply base font size (e.g. 1.3)
+      text_treatment: str — override the planner's chosen treatment
     """
     spec = layout_spec or {}
     overrides = css_overrides or {}
+    applied_treatment = overrides.get("text_treatment", text_treatment)
     base_font_size = _FONT_SIZES.get(target_age, 16)
     font_size = int(base_font_size * overrides.get("font_size_scale", 1.0))
     bg = spec.get("background_color", "#fffdf7")
@@ -947,6 +976,7 @@ def render_spread_html(
     ctx = _build_spread_context(
         spread_number, verso_text, recto_text,
         illustration_plan, image_bytes_by_index, spec, font_size,
+        text_treatment=applied_treatment,
     )
     return _SPREAD_TEMPLATE.render(
         font_family=spec.get("font_family", "Georgia, serif"),
@@ -995,36 +1025,41 @@ def _build_publishing_pages(spread_contexts: list[dict]) -> list[dict]:
         recto_text = ctx.get("recto_text")
         verso_num = ctx.get("verso_page_num")
         recto_num = ctx.get("recto_page_num")
+        overlay = {
+            "overlay_backdrop": ctx.get("overlay_backdrop", "transparent"),
+            "overlay_text_inline": ctx.get("overlay_text_inline", ""),
+            "overlay_num_inline": ctx.get("overlay_num_inline", ""),
+        }
 
         # verso page
         if ctx.get("verso_page_num") is not None or verso_text:
             if coverage == "full":
                 pages.append({"page_type": "full_verso", "image": images.get(0, ""),
-                               "text": verso_text, "page_num": verso_num, "has_content": True})
+                               "text": verso_text, "page_num": verso_num, "has_content": True, **overlay})
             elif coverage == "verso":
                 pages.append({"page_type": "image_only", "image": images.get(0, ""),
-                               "text": None, "page_num": verso_num, "has_content": True})
+                               "text": None, "page_num": verso_num, "has_content": True, **overlay})
             elif coverage == "dual":
                 pages.append({"page_type": "image_with_text", "image": images.get(0, ""),
-                               "text": verso_text, "page_num": verso_num, "has_content": True})
+                               "text": verso_text, "page_num": verso_num, "has_content": True, **overlay})
             else:
                 pages.append({"page_type": "text", "image": "",
-                               "text": verso_text, "page_num": verso_num, "has_content": bool(verso_text)})
+                               "text": verso_text, "page_num": verso_num, "has_content": bool(verso_text), **overlay})
 
         # recto page
         if ctx.get("recto_page_num") is not None or recto_text:
             if coverage == "full":
                 pages.append({"page_type": "full_recto", "image": images.get(0, ""),
-                               "text": recto_text, "page_num": recto_num, "has_content": True})
+                               "text": recto_text, "page_num": recto_num, "has_content": True, **overlay})
             elif coverage == "recto":
                 pages.append({"page_type": "image_only", "image": images.get(0, ""),
-                               "text": None, "page_num": recto_num, "has_content": True})
+                               "text": None, "page_num": recto_num, "has_content": True, **overlay})
             elif coverage == "dual":
                 pages.append({"page_type": "image_with_text", "image": images.get(1, ""),
-                               "text": recto_text, "page_num": recto_num, "has_content": True})
+                               "text": recto_text, "page_num": recto_num, "has_content": True, **overlay})
             else:
                 pages.append({"page_type": "text", "image": "",
-                               "text": recto_text, "page_num": recto_num, "has_content": bool(recto_text)})
+                               "text": recto_text, "page_num": recto_num, "has_content": bool(recto_text), **overlay})
 
     return pages
 

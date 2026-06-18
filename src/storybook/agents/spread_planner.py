@@ -33,7 +33,8 @@ Return a JSON object with exactly these top-level fields:
 Each spread entry:
 {
   "spread_number": <integer>,
-  "illustration_plan": [ ... 0, 1, or 2 entries ... ]
+  "illustration_plan": [ ... 0, 1, or 2 entries ... ],
+  "text_treatment": "<gradient_dark | gradient_light | direct>"
 }
 
 Each illustration_plan entry:
@@ -90,6 +91,27 @@ Variety rules:
 - Alternate "verso" and "recto" rather than always picking the same side.
 - Use two-image spreads for action sequences or paired character moments.
 - Most spreads (60-70%) should be single-image (verso or recto) with facing text.
+
+────────────────────────────────────────────
+TEXT TREATMENT (per spread)
+────────────────────────────────────────────
+`text_treatment` controls how text is rendered when it sits on top of an image.
+This is per-spread — vary it to avoid monotony.
+
+Options:
+- "gradient_dark": a dark semi-opaque gradient rises from the bottom; text is white.
+  Best for most images — reliable legibility when the image has any content in the
+  text zone. DEFAULT when uncertain.
+- "gradient_light": a soft gradient using the page background color; text uses text_color.
+  Use when the image is very dark throughout (e.g., night scene, dark ocean) so the
+  background-toned gradient blends naturally and dark text reads well.
+- "direct": no backdrop scrim at all; text rendered in text_color with a heavy drop shadow.
+  Only use when the image is intentionally calm, low-contrast, or has a dedicated
+  quiet area for text (e.g., a pale sky, a misty horizon, a large calm water reflection).
+  Do NOT use on busy or high-contrast images — the verifier will catch failures.
+
+For text-only spreads (empty illustration_plan), text_treatment is irrelevant but
+still required — use "gradient_dark" as default.
 
 ────────────────────────────────────────────
 TYPOGRAPHY & COLOR RULES

@@ -22,15 +22,22 @@ After the JSON text part you receive the actual illustration image(s). USE THEM 
 WHAT TO CHECK (in order of importance)
 ────────────────────────────────────────────
 
-1. LEGIBILITY — Is the text readable? (MOST IMPORTANT)
-   Look at the actual image AND the HTML text-backdrop/text-over-image CSS:
-   - Is there a `.text-backdrop` or `.text-over-image` element in the HTML? If not and text
-     overlaps the image, REJECT — no backdrop means the text is invisible.
-   - For FULL-BLEED coverage: look at the ACTUAL IMAGE. Is the bottom third busy, bright, or
-     high-contrast? If so, reject even if a gradient exists — the gradient may be insufficient.
-   - Is the font size adequate? For 9-12 age group, 13pt minimum; 4-5 group, 18pt minimum.
-   - Does the CSS show white text (color: #ffffff) in the backdrop elements? If not and the
-     coverage is full-bleed, suggest changing to white text.
+1. LEGIBILITY — Is the text readable against the actual image? (MOST IMPORTANT)
+   Look at the image AND the HTML. For text overlaid on an image, there are three treatments:
+   - "gradient_dark": `.text-backdrop` has a dark gradient background — white text. Good default.
+   - "gradient_light": `.text-backdrop` has a light/warm gradient — dark text. For dark images.
+   - "direct": `.text-backdrop` has transparent background — colored text with drop shadow.
+
+   REJECT only if there is a genuine legibility failure:
+   - The bottom third of the image is bright, busy, or high-contrast AND the chosen treatment
+     is "direct" or "gradient_light" — the text would be unreadable.
+   - The image is very dark throughout AND "gradient_dark" is used — the dark gradient
+     disappears into the dark image. "gradient_light" would be better.
+   - The font size is clearly too small (below minimum for age group).
+   - There is NO backdrop element at all for text sitting over an image.
+
+   DO NOT reject because of a particular color choice if the text is actually readable.
+   The planner makes intentional choices — only override them when legibility is genuinely broken.
 
 2. STRUCTURAL — Does the image appear on the correct side?
    - "full": img spans the full spread (100% width)
@@ -45,13 +52,13 @@ WHAT TO CHECK (in order of importance)
 REJECTION THRESHOLD
 ────────────────────────────────────────────
 Reject for:
-- No contrast backdrop on image-overlaid text (clear structural fail)
-- Actual image is bright/busy in the text zone AND the gradient won't be enough
-- Text color is dark (#1a1a1a, #333, etc.) for text overlaid on an image — must be white
+- Actual legibility failure: text is genuinely unreadable against the image
 - Image on wrong side (verso vs recto mismatch)
+- No backdrop element at all for text over an image
 - Visible distortion
 
 Do NOT reject for:
+- A non-dark-gradient treatment that is still readable (intentional planner choice)
 - Minor padding differences
 - Font choice, accent colors on non-overlay pages
 - Small size differences within 10%
@@ -62,19 +69,20 @@ you can name precisely with a concrete fix.
 ────────────────────────────────────────────
 WHEN REJECTING — BE SPECIFIC AND STRUCTURED
 ────────────────────────────────────────────
-`feedback`: exactly what is wrong (e.g. "Dark text (#1a1a1a) overlaid on a bright
-  sky image — completely unreadable. The bottom quarter of the image has blue sky
-  with white clouds, no contrast for text.")
+`feedback`: exactly what is wrong and why it fails with the actual image content.
 
-`suggested_fix`: plain English description of the remedy
+`suggested_fix`: plain English description of the remedy.
 
 `css_overrides`: a JSON-serializable dict with any of these keys to fix the issue:
-  - "text_color_overlay": "#ffffff" — force white text in backdrop/overlay elements
-  - "gradient_strength": "strong" — increase gradient opacity to 0.95+
+  - "text_treatment": "gradient_dark" — switch to dark gradient scrim with white text
+                                        (use when image is bright/busy in the text zone)
+  - "text_treatment": "gradient_light" — switch to light/warm gradient, dark text
+                                         (use when image is very dark throughout)
+  - "text_treatment": "direct" — no scrim, colored text with drop shadow
+                                  (use when image has calm empty space for text)
   - "font_size_scale": 1.3 — multiply base font size by this factor (e.g. 1.2–1.5)
-  - "backdrop_height": "40%" — expand the gradient to cover more of the page height
 
-Example css_overrides: {"text_color_overlay": "#ffffff", "gradient_strength": "strong"}
+Example css_overrides: {"text_treatment": "gradient_dark"}
 
 CRITICAL — YOU MUST CALL A TOOL. Do not write a prose verdict. Do not summarize your
 conclusion in text. The pipeline ignores all text output; only tool calls are processed.
@@ -101,8 +109,8 @@ def reject_layout(
     Args:
         feedback: Specific description of what is wrong (reference actual image content).
         suggested_fix: Plain English remedy.
-        css_overrides: Dict of CSS property overrides to apply on re-render.
-            Valid keys: text_color_overlay, gradient_strength, font_size_scale, backdrop_height.
+        css_overrides: Dict of overrides to apply on re-render.
+            Valid keys: text_treatment ("gradient_dark"|"gradient_light"|"direct"), font_size_scale (float).
     """
     tool_context.state["layout_feedback"] = feedback
     tool_context.state["layout_suggested_fix"] = suggested_fix

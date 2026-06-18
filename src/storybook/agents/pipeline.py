@@ -315,6 +315,7 @@ async def run_pipeline(
         SpreadPlan(
             spread_number=sp["spread_number"],
             illustration_plan=[IllustrationEntry(**e) for e in sp.get("illustration_plan", [])],
+            text_treatment=sp.get("text_treatment", "gradient_dark"),
         )
         for sp in spread_plans_raw
     ]
@@ -339,6 +340,8 @@ async def run_pipeline(
         illustration_plan: list[IllustrationEntry],
         image_bytes_by_index: dict[int, bytes],
     ) -> str:
+        plan = plan_by_spread.get(spread_number, SpreadPlan(spread_number=spread_number))
+        base_treatment = plan.text_treatment
         verifier_runner = _make_runner(html_page_verifier)
         spread_html = ""
         accumulated_overrides: dict = {}
@@ -347,6 +350,7 @@ async def run_pipeline(
         secondary_img_bytes = image_bytes_by_index.get(1) if 0 in image_bytes_by_index else None
 
         for verify_attempt in range(1, 3):
+            applied_treatment = accumulated_overrides.get("text_treatment", base_treatment)
             spread_html = render_spread_html(
                 spread_number=spread_number,
                 verso_text=spread_content.verso_text,
@@ -356,6 +360,7 @@ async def run_pipeline(
                 layout_spec=layout_spec,
                 target_age=cfg.target_age,
                 css_overrides=accumulated_overrides if accumulated_overrides else None,
+                text_treatment=applied_treatment,
             )
             html_for_verify = re.sub(
                 r'src="data:image/[^;]+;base64,[^"]*"',
@@ -518,6 +523,7 @@ async def run_pipeline(
             image_bytes_by_index=results.get(s, {}),
             layout_spec=layout_spec,
             font_size=font_size,
+            text_treatment=plan.text_treatment,
         )
         spread_contexts.append(ctx)
 
