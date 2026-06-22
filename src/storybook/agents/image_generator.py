@@ -32,20 +32,17 @@ _ASPECT_RATIO_GUIDANCE: dict[str, str] = {
 
 
 def generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
-    """
-    Generate a single illustration using Nano Banana 2.
+    """Generate an illustration; wraps the call in a Cloud Trace span."""
+    from storybook.tracing import get_tracer
+    with get_tracer().start_as_current_span(
+        "image.generate",
+        attributes={"image.aspect_ratio": aspect_ratio, "image.model": settings.model_image},
+    ):
+        return _generate_image(prompt, aspect_ratio)
 
-    Args:
-        prompt: The image generation prompt (from IllustrationPrompter).
-        aspect_ratio: Target aspect ratio string — "16:9", "3:4", or "1:1".
 
-    Returns:
-        Raw PNG image bytes.
-
-    Raises:
-        ImageContentPolicyError: if the model refuses due to safety filters.
-        RuntimeError: for any other failure.
-    """
+def _generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
+    """Generate a single illustration using Nano Banana 2."""
     guidance = _ASPECT_RATIO_GUIDANCE.get(aspect_ratio, "")
     full_prompt = f"[{guidance}] {prompt}" if guidance else prompt
 

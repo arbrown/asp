@@ -76,15 +76,31 @@ async def _run_agent(
     reference_image: bytes | None = None,
     prev_spread_image: bytes | None = None,
 ) -> str:
-    """Run an ADK agent and return the final text response.
+    """Run an ADK agent; wraps the call in a Cloud Trace span."""
+    from storybook.tracing import get_tracer
+    with get_tracer().start_as_current_span(
+        f"agent.{runner.agent.name}",
+        attributes={"agent.name": runner.agent.name, "session.id": session_id},
+    ):
+        return await _run_agent_impl(
+            runner, session_id, message,
+            output_key=output_key,
+            subject_image=subject_image,
+            reference_image=reference_image,
+            prev_spread_image=prev_spread_image,
+        )
 
-    If output_key is provided, the return value is read from ADK session state.
-    subject_image: the image being evaluated.
-    reference_image: spread 0/1's image for style comparison.
-    prev_spread_image: the previous spread's illustration for continuity checking.
 
-    Retries with exponential backoff on 429 RESOURCE_EXHAUSTED errors.
-    """
+async def _run_agent_impl(
+    runner: Runner,
+    session_id: str,
+    message: str,
+    output_key: str | None = None,
+    subject_image: bytes | None = None,
+    reference_image: bytes | None = None,
+    prev_spread_image: bytes | None = None,
+) -> str:
+    """Retries with exponential backoff on 429 RESOURCE_EXHAUSTED errors."""
     parts: list[types.Part] = [types.Part(text=message)]
     if subject_image:
         parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=subject_image)))
