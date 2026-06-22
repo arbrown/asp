@@ -92,3 +92,4 @@ class PipelineState(BaseModel):
     current_stage: str = "initializing"
     progress_pct: int = 0
     errors: list[str] = []
+    trace_url: str = ""

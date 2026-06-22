@@ -169,6 +169,7 @@ def _session_meta(state: PipelineState) -> dict:
         "progress_pct": state.progress_pct,
         "pdf_gcs_uri": state.pdf_gcs_uri,
         "wide_pdf_gcs_uri": state.wide_pdf_gcs_uri,
+        "trace_url": state.trace_url,
         "errors": state.errors,
     }
 
@@ -259,6 +260,7 @@ async def get_session(session_id: str) -> SessionResponse:
         config=state.config,
         pdf_signed_url=f"/api/v1/sessions/{session_id}/pdf" if state.pdf_gcs_uri else None,
         wide_pdf_url=f"/api/v1/sessions/{session_id}/pdf/wide" if state.wide_pdf_gcs_uri else None,
+        trace_url=state.trace_url or None,
         errors=state.errors,
         resumable=state.current_stage == "error",
     )

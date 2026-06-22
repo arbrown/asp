@@ -18,6 +18,7 @@ class SessionResponse(BaseModel):
     config: Optional[SessionConfig] = None
     pdf_signed_url: Optional[str] = None
     wide_pdf_url: Optional[str] = None
+    trace_url: Optional[str] = None
     errors: list[str] = []
     resumable: bool = False
 

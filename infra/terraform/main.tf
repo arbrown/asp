@@ -15,6 +15,7 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudresourcemanager.googleapis.com",
+    "cloudtrace.googleapis.com",
     "compute.googleapis.com",
     "container.googleapis.com",
     "iam.googleapis.com",
@@ -105,6 +106,12 @@ resource "google_service_account" "cloudbuild" {
 resource "google_project_iam_member" "backend_vertex_user" {
   project = var.project_id
   role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.backend.email}"
+}
+
+resource "google_project_iam_member" "backend_trace_agent" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
   member  = "serviceAccount:${google_service_account.backend.email}"
 }
 

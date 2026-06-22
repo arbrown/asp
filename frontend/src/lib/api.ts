@@ -23,6 +23,7 @@ export interface SessionSummary {
   config?: SessionConfig;
   pdf_signed_url?: string;
   wide_pdf_url?: string;
+  trace_url?: string;
   errors: string[];
   resumable?: boolean;
 }

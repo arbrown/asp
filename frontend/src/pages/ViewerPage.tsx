@@ -18,6 +18,7 @@ export default function ViewerPage() {
   if (!session) return <p className="text-red-600">Session not found.</p>;
 
   const isReady = session.current_stage === "done" && session.pdf_signed_url;
+  const traceUrl = session.trace_url;
   const title = session.config?.source?.title || "Your Storybook";
   const author = session.config?.source?.author;
   const coverUrl = `${BASE}/sessions/${id}/spreads/0/image/0`;
@@ -31,6 +32,16 @@ export default function ViewerPage() {
             <p className="text-sm text-sepia-600 mt-0.5">Adapted from {author}</p>
           )}
           <p className="text-xs font-mono text-sepia-500 mt-1">{id}</p>
+          {traceUrl && (
+            <a
+              href={traceUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-sepia-400 hover:text-sepia-600 underline mt-0.5 inline-block"
+            >
+              View trace
+            </a>
+          )}
         </div>
         {isReady && (
           <div className="flex gap-2 shrink-0">

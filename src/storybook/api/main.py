@@ -4,14 +4,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from storybook.api.routes import _sessions, router
+from storybook.config import settings
 from storybook.models import PipelineState, SessionConfig
 from storybook.tools import gcs
+from storybook.tracing import init_tracing
 
 logging.basicConfig(level=logging.INFO)
 
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Storybook Agent API", version="0.1.0")
+
+init_tracing(settings.gcp_project_id)
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +42,7 @@ async def reload_sessions() -> None:
                     current_stage=m.get("current_stage", "unknown"),
                     progress_pct=m.get("progress_pct", 0),
                     pdf_gcs_uri=m.get("pdf_gcs_uri", ""),
+                    trace_url=m.get("trace_url", ""),
                     errors=m.get("errors", []),
                 )
                 _sessions[sid] = state

@@ -159,6 +159,28 @@ async def run_pipeline(
     resume: bool = False,
 ) -> PipelineState:
     """Execute the full storybook pipeline. Writes progress events to progress_queue."""
+    from storybook.tracing import get_tracer, make_trace_url
+
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        "pipeline.run",
+        attributes={
+            "session.id": state.session_id,
+            "config.target_age": state.config.target_age,
+            "config.page_count": state.config.page_count,
+        },
+    ) as root_span:
+        ctx = root_span.get_span_context()
+        if ctx.is_valid:
+            state.trace_url = make_trace_url(ctx.trace_id)
+        return await _run_pipeline(state, progress_queue, resume)
+
+
+async def _run_pipeline(
+    state: PipelineState,
+    progress_queue: asyncio.Queue,
+    resume: bool = False,
+) -> PipelineState:
 
     async def emit(stage: str, pct: int, **extra):
         await progress_queue.put({"stage": stage, "pct": pct, **extra})
