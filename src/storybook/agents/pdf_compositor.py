@@ -30,11 +30,27 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
-def _get_overlay_styles(text_treatment: str, text_color: str, bg_rgb: str) -> dict:
-    """Compute per-spread overlay CSS values from the planner's chosen text treatment."""
+def _get_overlay_styles(
+    text_treatment: str,
+    text_color: str,
+    bg_rgb: str,
+    text_position: str = "bottom",
+) -> dict:
+    """Compute per-spread overlay CSS values from the planner's chosen treatment and position."""
+    if text_position == "top":
+        grad_dir = "to top"          # gradient is opaque at element top, fades downward
+        position_css = "top: 0; left: 0; right: 0;"
+        padding = "0.3in 0.5in 0.35in"
+        page_justify = "flex-start"
+    else:  # "bottom"
+        grad_dir = "to bottom"       # gradient is opaque at element bottom, fades upward
+        position_css = "bottom: 0; left: 0; right: 0;"
+        padding = "0.35in 0.5in 0.3in"
+        page_justify = "flex-end"
+
     if text_treatment == "gradient_light":
         backdrop = (
-            f"linear-gradient(to bottom, rgba({bg_rgb},0) 0%,"
+            f"linear-gradient({grad_dir}, rgba({bg_rgb},0) 0%,"
             f" rgba({bg_rgb},0.88) 40%, rgba({bg_rgb},0.97) 100%)"
         )
         text_inline = f"color: {text_color};"
@@ -57,7 +73,7 @@ def _get_overlay_styles(text_treatment: str, text_color: str, bg_rgb: str) -> di
         )
     else:  # "gradient_dark" — default, reliable for most images
         backdrop = (
-            "linear-gradient(to bottom,"
+            f"linear-gradient({grad_dir},"
             " rgba(0,0,0,0) 0%, rgba(0,0,0,0.72) 35%, rgba(0,0,0,0.91) 100%)"
         )
         text_inline = "color: #ffffff; text-shadow: 0 1px 4px rgba(0,0,0,0.6);"
@@ -68,11 +84,16 @@ def _get_overlay_styles(text_treatment: str, text_color: str, bg_rgb: str) -> di
             "  .text-backdrop .page-number, .text-over-image .page-number"
             " { color: rgba(255,255,255,0.75); }"
         )
+
     return {
         "overlay_backdrop": backdrop,
+        "overlay_position_css": position_css,
+        "overlay_padding": padding,
+        "overlay_css_block": css_block,
+        "overlay_box_inline": f"background: {backdrop}; {position_css} padding: {padding};",
         "overlay_text_inline": text_inline,
         "overlay_num_inline": num_inline,
-        "overlay_css_block": css_block,
+        "overlay_page_justify": page_justify,
     }
 
 
@@ -567,10 +588,10 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
   }
   .text-backdrop {
     position: absolute;
-    bottom: 0; left: 0; right: 0;
+    {{ overlay_position_css }}
     z-index: 2;
     background: {{ overlay_backdrop }};
-    padding: 0.35in 0.5in 0.3in;
+    padding: {{ overlay_padding }};
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -578,10 +599,10 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
   }
   .text-over-image {
     position: absolute;
-    bottom: 0; left: 0; right: 0;
+    {{ overlay_position_css }}
     z-index: 2;
     background: {{ overlay_backdrop }};
-    padding: 0.3in 0.4in 0.25in;
+    padding: {{ overlay_padding }};
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -604,7 +625,7 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
 {% if coverage == "full" %}
   <img class="full-bleed-img" src="data:image/png;base64,{{ images[0] }}" alt="Spread illustration">
   <!-- verso side: blank or verso text with backdrop -->
-  <div class="spread-page verso-page" style="justify-content:flex-end; padding:0;">
+  <div class="spread-page verso-page" style="justify-content:{{ overlay_page_justify }}; padding:0;">
     {% if verso_text %}
     <div class="text-backdrop">
       <div class="page-text">{{ verso_text }}</div>
@@ -613,7 +634,7 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
     {% endif %}
   </div>
   <!-- recto side: recto text with backdrop -->
-  <div class="spread-page" style="justify-content:flex-end; padding:0;">
+  <div class="spread-page" style="justify-content:{{ overlay_page_justify }}; padding:0;">
     {% if recto_text %}
     <div class="text-backdrop">
       <div class="page-text">{{ recto_text }}</div>
@@ -729,16 +750,8 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
     z-index: 3;
   }
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index:3; margin-top: auto; padding-top: 0.2in; }
-  .text-backdrop {
-    position: absolute; bottom:0; left:0; right:0; z-index:2;
-    padding: 0.35in 0.5in 0.3in;
-    display: flex; flex-direction: column; align-items: center; gap: 0.1in;
-  }
-  .text-over-image {
-    position: absolute; bottom:0; left:0; right:0; z-index:2;
-    padding: 0.3in 0.4in 0.25in;
-    display: flex; flex-direction: column; align-items: center; gap: 0.1in;
-  }
+  .text-backdrop { position: absolute; z-index:2; display: flex; flex-direction: column; align-items: center; gap: 0.1in; }
+  .text-over-image { position: absolute; z-index:2; display: flex; flex-direction: column; align-items: center; gap: 0.1in; }
   .cover-half {
     display: flex; flex-direction: column; justify-content: center; align-items: center;
   }
@@ -761,11 +774,11 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 <div class="spread-page">
 {% if s.coverage == "full" %}
   <img class="full-bleed-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Spread {{ s.spread_number }}">
-  <div class="half-page verso" style="justify-content:flex-end; padding:0;">
-    {% if s.verso_text %}<div class="text-backdrop" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
+  <div class="half-page verso" style="justify-content:{{ s.overlay_page_justify }}; padding:0;">
+    {% if s.verso_text %}<div class="text-backdrop" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
-  <div class="half-page" style="justify-content:flex-end; padding:0;">
-    {% if s.recto_text %}<div class="text-backdrop" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
+  <div class="half-page" style="justify-content:{{ s.overlay_page_justify }}; padding:0;">
+    {% if s.recto_text %}<div class="text-backdrop" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
 {% elif s.coverage == "verso" %}
   <div class="half-page verso" style="padding:0;">
@@ -786,11 +799,11 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 {% elif s.coverage == "dual" %}
   <div class="half-page verso" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Left illustration">
-    {% if s.verso_text %}<div class="text-over-image" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.verso_text %}<div class="text-over-image" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
   <div class="half-page" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[1] }}" alt="Right illustration">
-    {% if s.recto_text %}<div class="text-over-image" style="background: {{ s.overlay_backdrop }};"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
+    {% if s.recto_text %}<div class="text-over-image" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% endif %}
   </div>
 {% else %}
   <div class="half-page verso">
@@ -849,16 +862,8 @@ _PUBLISHING_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   }
   .page-text { font-size: {{ font_size }}pt; line-height: 1.7; color: {{ text_color }}; text-align: center; position: relative; z-index: 3; }
   .page-number { font-size: 10pt; color: {{ accent_color }}; position: relative; z-index: 3; margin-top: auto; padding-top: 0.2in; }
-  .text-backdrop {
-    position: absolute; bottom:0; left:0; right:0; z-index:2;
-    padding: 0.35in 0.5in 0.3in;
-    display: flex; flex-direction: column; align-items: center; gap: 0.1in;
-  }
-  .text-over-image {
-    position: absolute; bottom:0; left:0; right:0; z-index:2;
-    padding: 0.3in 0.4in 0.25in;
-    display: flex; flex-direction: column; align-items: center; gap: 0.1in;
-  }
+  .text-backdrop { position: absolute; z-index:2; display: flex; flex-direction: column; align-items: center; gap: 0.1in; }
+  .text-over-image { position: absolute; z-index:2; display: flex; flex-direction: column; align-items: center; gap: 0.1in; }
   .cover-title { font-size: 42pt; font-weight: bold; text-align: center; color: {{ text_color }}; margin-bottom: 0.3in; line-height: 1.2; }
   .cover-author { font-size: 16pt; color: {{ accent_color }}; text-align: center; }
 </style>
@@ -875,16 +880,16 @@ _PUBLISHING_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 <div class="portrait-page" style="{% if not p.has_content %}justify-content: center; align-items: center;{% endif %}">
 {% if p.page_type == "full_verso" %}
   <img class="full-bleed-img-left" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-backdrop" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-backdrop" style="{{ p.overlay_box_inline }}"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% elif p.page_type == "full_recto" %}
   <img class="full-bleed-img-right" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-backdrop" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-backdrop" style="{{ p.overlay_box_inline }}"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% elif p.page_type == "image_only" %}
   <img class="portrait-img" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
   {% if p.page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;z-index:3;">{{ p.page_num }}</div>{% endif %}
 {% elif p.page_type == "image_with_text" %}
   <img class="portrait-img" src="data:image/png;base64,{{ p.image }}" alt="Illustration">
-  {% if p.text %}<div class="text-over-image" style="background: {{ p.overlay_backdrop }};"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
+  {% if p.text %}<div class="text-over-image" style="{{ p.overlay_box_inline }}"><div class="page-text" style="{{ p.overlay_text_inline }}">{{ p.text }}</div>{% if p.page_num %}<div class="page-number" style="{{ p.overlay_num_inline }}">{{ p.page_num }}</div>{% endif %}</div>{% endif %}
 {% else %}
   {% if p.text %}<div class="page-text">{{ p.text }}</div>{% endif %}
   {% if p.page_num %}<div class="page-number">{{ p.page_num }}</div>{% endif %}
@@ -915,6 +920,7 @@ def _build_spread_context(
     layout_spec: dict,
     font_size: int,
     text_treatment: str = "gradient_dark",
+    text_position: str = "bottom",
 ) -> dict:
     """Build a template context dict describing one spread's layout and content."""
     bg = layout_spec.get("background_color", "#fffdf7")
@@ -922,7 +928,7 @@ def _build_spread_context(
     r, g, b = _hex_to_rgb(bg)
     bg_rgb = f"{r},{g},{b}"
     verso_num, recto_num = _spread_page_numbers(spread_number)
-    overlay = _get_overlay_styles(text_treatment, text_color, bg_rgb)
+    overlay = _get_overlay_styles(text_treatment, text_color, bg_rgb, text_position)
 
     images: dict[int, str] = {}
     for idx, data in image_bytes_by_index.items():
@@ -959,6 +965,7 @@ def render_spread_html(
     target_age: str = "4-5",
     css_overrides: dict | None = None,
     text_treatment: str = "gradient_dark",
+    text_position: str = "bottom",
 ) -> str:
     """Render a two-page spread as a self-contained 17×11 HTML document with embedded images.
 
@@ -977,6 +984,7 @@ def render_spread_html(
         spread_number, verso_text, recto_text,
         illustration_plan, image_bytes_by_index, spec, font_size,
         text_treatment=applied_treatment,
+        text_position=text_position,
     )
     return _SPREAD_TEMPLATE.render(
         font_family=spec.get("font_family", "Georgia, serif"),
@@ -1026,7 +1034,7 @@ def _build_publishing_pages(spread_contexts: list[dict]) -> list[dict]:
         verso_num = ctx.get("verso_page_num")
         recto_num = ctx.get("recto_page_num")
         overlay = {
-            "overlay_backdrop": ctx.get("overlay_backdrop", "transparent"),
+            "overlay_box_inline": ctx.get("overlay_box_inline", ""),
             "overlay_text_inline": ctx.get("overlay_text_inline", ""),
             "overlay_num_inline": ctx.get("overlay_num_inline", ""),
         }

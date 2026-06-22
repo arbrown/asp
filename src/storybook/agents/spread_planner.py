@@ -34,7 +34,8 @@ Each spread entry:
 {
   "spread_number": <integer>,
   "illustration_plan": [ ... 0, 1, or 2 entries ... ],
-  "text_treatment": "<gradient_dark | gradient_light | direct>"
+  "text_treatment": "<gradient_dark | gradient_light | direct>",
+  "text_position": "<top | bottom>"
 }
 
 Each illustration_plan entry:
@@ -80,9 +81,12 @@ Blank page sides:
 illustration_notes:
 - Rich visual direction synthesized from verso_instructions + recto_instructions in the
   adapter output. Describe what to draw, mood, lighting, character positions.
-- For "full" coverage, specify that the BOTTOM THIRD of the image must be intentionally
-  calm and low-contrast so that overlaid text remains legible.
-- For "verso" or "recto", the illustration fills its page; the facing page carries text.
+- For "full" or "dual" coverage (text overlaid on image), you MUST specify which zone
+  must be left calm for text — matching `text_position`:
+    text_position "top"    → "Leave the TOP QUARTER calm and low-contrast for text."
+    text_position "bottom" → "Leave the BOTTOM THIRD calm and low-contrast for text."
+- For "verso" or "recto", the illustration fills its page; the facing page carries text
+  (no calm zone required).
 
 Variety rules:
 - Never assign the same coverage type to every spread — vary the rhythm.
@@ -91,6 +95,31 @@ Variety rules:
 - Alternate "verso" and "recto" rather than always picking the same side.
 - Use two-image spreads for action sequences or paired character moments.
 - Most spreads (60-70%) should be single-image (verso or recto) with facing text.
+
+────────────────────────────────────────────
+TEXT POSITION (per spread)
+────────────────────────────────────────────
+`text_position` controls where the text block sits on the image. Choose based on
+where the image has a natural calm area — the art should frame the text, not compete
+with it.
+
+- "top": Text appears at the TOP of the image. Gradient fades from opaque at top to
+  transparent downward. Use when the image's calm zone (sky, mist, pale background)
+  is at the top — very common in landscape scenes, silhouette art, and compositions
+  where the action is in the lower portion.
+- "bottom": Text appears at the BOTTOM of the image. Gradient fades from opaque at
+  bottom to transparent upward. Use when the calm zone is at the bottom — water
+  reflections, ground planes, lower negative space.
+
+CRITICAL: Whatever `text_position` you choose, your `illustration_notes` for the
+image MUST explicitly tell the illustrator which zone to leave calm:
+  text_position "top"    → "Leave the TOP QUARTER of the image deliberately calm,
+                            light, and low-contrast for text overlay. ..."
+  text_position "bottom" → "Leave the BOTTOM THIRD of the image deliberately calm
+                            and low-contrast for text overlay. ..."
+
+Default to "top" for most landscape and atmospheric scenes — sky and open space
+naturally appear at the top and provide excellent contrast for text.
 
 ────────────────────────────────────────────
 TEXT TREATMENT (per spread)

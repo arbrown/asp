@@ -316,6 +316,7 @@ async def run_pipeline(
             spread_number=sp["spread_number"],
             illustration_plan=[IllustrationEntry(**e) for e in sp.get("illustration_plan", [])],
             text_treatment=sp.get("text_treatment", "gradient_dark"),
+            text_position=sp.get("text_position", "bottom"),
         )
         for sp in spread_plans_raw
     ]
@@ -342,6 +343,7 @@ async def run_pipeline(
     ) -> str:
         plan = plan_by_spread.get(spread_number, SpreadPlan(spread_number=spread_number))
         base_treatment = plan.text_treatment
+        base_position = plan.text_position
         verifier_runner = _make_runner(html_page_verifier)
         spread_html = ""
         accumulated_overrides: dict = {}
@@ -361,6 +363,7 @@ async def run_pipeline(
                 target_age=cfg.target_age,
                 css_overrides=accumulated_overrides if accumulated_overrides else None,
                 text_treatment=applied_treatment,
+                text_position=base_position,
             )
             html_for_verify = re.sub(
                 r'src="data:image/[^;]+;base64,[^"]*"',
@@ -524,6 +527,7 @@ async def run_pipeline(
             layout_spec=layout_spec,
             font_size=font_size,
             text_treatment=plan.text_treatment,
+            text_position=plan.text_position,
         )
         spread_contexts.append(ctx)
 
