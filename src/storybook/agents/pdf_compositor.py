@@ -644,10 +644,17 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
   </div>
 
 {% elif coverage == "verso" %}
-  <!-- verso: image fills left page -->
+  <!-- verso: image fills left page; verso_text overlaid if present -->
   <div class="spread-page verso-page" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ images[0] }}" alt="Illustration">
-    {% if verso_page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;">{{ verso_page_num }}</div>{% endif %}
+    {% if verso_text %}
+    <div class="text-over-image" style="{{ overlay_box_inline }}">
+      <div class="page-text" style="{{ overlay_text_inline }}">{{ verso_text }}</div>
+      {% if verso_page_num %}<div class="page-number" style="{{ overlay_num_inline }}">{{ verso_page_num }}</div>{% endif %}
+    </div>
+    {% elif verso_page_num %}
+    <div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;">{{ verso_page_num }}</div>
+    {% endif %}
   </div>
   <!-- recto: text column -->
   <div class="spread-page">
@@ -661,10 +668,17 @@ _SPREAD_TEMPLATE = Template("""<!DOCTYPE html>
     {% if verso_text %}<div class="page-text">{{ verso_text }}</div>{% endif %}
     {% if verso_page_num %}<div class="page-number">{{ verso_page_num }}</div>{% endif %}
   </div>
-  <!-- recto: image fills right page -->
+  <!-- recto: image fills right page; recto_text overlaid if present -->
   <div class="spread-page" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ images[0] }}" alt="Illustration">
-    {% if recto_page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;">{{ recto_page_num }}</div>{% endif %}
+    {% if recto_text %}
+    <div class="text-over-image" style="{{ overlay_box_inline }}">
+      <div class="page-text" style="{{ overlay_text_inline }}">{{ recto_text }}</div>
+      {% if recto_page_num %}<div class="page-number" style="{{ overlay_num_inline }}">{{ recto_page_num }}</div>{% endif %}
+    </div>
+    {% elif recto_page_num %}
+    <div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;">{{ recto_page_num }}</div>
+    {% endif %}
   </div>
 
 {% elif coverage == "dual" %}
@@ -783,6 +797,7 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
 {% elif s.coverage == "verso" %}
   <div class="half-page verso" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Illustration">
+    {% if s.verso_text %}<div class="text-over-image" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.verso_text }}</div>{% if s.verso_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.verso_page_num }}</div>{% endif %}</div>{% elif s.verso_page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;z-index:3;">{{ s.verso_page_num }}</div>{% endif %}
   </div>
   <div class="half-page">
     {% if s.recto_text %}<div class="page-text">{{ s.recto_text }}</div>{% endif %}
@@ -795,6 +810,7 @@ _WIDE_PDF_TEMPLATE = Template("""<!DOCTYPE html>
   </div>
   <div class="half-page" style="padding:0;">
     <img class="portrait-img" src="data:image/png;base64,{{ s.images[0] }}" alt="Illustration">
+    {% if s.recto_text %}<div class="text-over-image" style="{{ s.overlay_box_inline }}"><div class="page-text" style="{{ s.overlay_text_inline }}">{{ s.recto_text }}</div>{% if s.recto_page_num %}<div class="page-number" style="{{ s.overlay_num_inline }}">{{ s.recto_page_num }}</div>{% endif %}</div>{% elif s.recto_page_num %}<div class="page-number" style="position:absolute;bottom:0.2in;right:0.3in;z-index:3;">{{ s.recto_page_num }}</div>{% endif %}
   </div>
 {% elif s.coverage == "dual" %}
   <div class="half-page verso" style="padding:0;">

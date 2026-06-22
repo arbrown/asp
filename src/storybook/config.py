@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     gcs_artifacts_bucket: str
 
     # Text models
-    model_adapter: str = "gemini-3.1-pro-preview"
+    model_adapter: str = "gemini-3.5-flash"
     model_fast: str = "gemini-3.5-flash"
 
     # Image model (Nano Banana 2)

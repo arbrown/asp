@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 
 from google.adk.agents import LlmAgent, LoopAgent
@@ -56,6 +57,66 @@ _text_loop = LoopAgent(
     sub_agents=[story_adapter, text_validator],
     max_iterations=settings.text_max_retries + 1,
 )
+
+# ── Text chunking ─────────────────────────────────────────────────────────────
+
+_CHUNK_WORD_LIMIT = 250_000
+
+
+def _chunk_source_text(
+    source_text: str,
+    spread_count: int,
+    spreads_meta: list[dict],
+) -> list[dict]:
+    """Split source text into equal chunks when it exceeds _CHUNK_WORD_LIMIT words.
+
+    Each chunk gets a proportional slice of spreads. Adjacent chunks overlap by 1%
+    of total words so the adapter has continuity context at boundaries.
+
+    Returns a list of dicts with keys: text, spread_count, spreads_meta, chunk_context.
+    Returns a single-element list (no split) when text fits within the limit.
+    """
+    words = source_text.split()
+    total_words = len(words)
+
+    if total_words <= _CHUNK_WORD_LIMIT:
+        return [{"text": source_text, "spread_count": spread_count,
+                 "spreads_meta": spreads_meta, "chunk_context": None}]
+
+    n_chunks = math.ceil(total_words / _CHUNK_WORD_LIMIT)
+    overlap = max(100, int(total_words * 0.01))
+    spreads_per_chunk = spread_count / n_chunks
+
+    chunks = []
+    for i in range(n_chunks):
+        text_start = max(0, i * total_words // n_chunks - (overlap if i > 0 else 0))
+        text_end = min(total_words, (i + 1) * total_words // n_chunks + (overlap if i < n_chunks - 1 else 0))
+        chunk_text = " ".join(words[text_start:text_end])
+
+        spread_start = round(i * spreads_per_chunk)
+        spread_end = spread_count if i == n_chunks - 1 else round((i + 1) * spreads_per_chunk)
+        chunk_spreads = spreads_meta[spread_start:spread_end]
+
+        if n_chunks <= 3:
+            position = ["opening", "middle", "closing"][i]
+        else:
+            position = f"part {i + 1} of {n_chunks}"
+
+        chunks.append({
+            "text": chunk_text,
+            "spread_count": len(chunk_spreads),
+            "spreads_meta": chunk_spreads,
+            "chunk_context": {
+                "chunk_number": i + 1,
+                "total_chunks": n_chunks,
+                "story_position": position,
+                "is_first_chunk": i == 0,
+                "is_last_chunk": i == n_chunks - 1,
+            },
+        })
+
+    return chunks
+
 
 # ── Runner helpers ────────────────────────────────────────────────────────────
 
@@ -235,34 +296,50 @@ async def _run_pipeline(
 
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
         await emit("adapting_text", 15)
-        loop_runner = _make_runner(_text_loop)
-        adapter_config = {
-            **cfg.model_dump(),
-            "spread_count": spread_count,
-            "spreads_meta": spreads_meta,
-        }
-        state.adapted_text = await _run_agent(
-            loop_runner,
-            sid,
-            json.dumps({
-                "source_text": state.source_text,
-                "config": adapter_config,
-            }),
-            output_key="adapted_text",
-        )
-        adapted_raw = state.adapted_text.strip().removeprefix("```json").removesuffix("```").strip()
-        try:
-            parsed = json.loads(adapted_raw)
-            state.spread_contents = [SpreadContent(**s) for s in parsed["spreads"]]
-        except Exception as exc:
-            raise RuntimeError(
-                f"Story adapter returned invalid JSON: {exc}\n\nRaw output:\n{state.adapted_text[:500]}"
+        chunks = _chunk_source_text(state.source_text, spread_count, spreads_meta)
+        if len(chunks) > 1:
+            log.info("Source text is large (%d words) — adapting in %d chunks",
+                     len(state.source_text.split()), len(chunks))
+
+        all_spread_contents: list[SpreadContent] = []
+        for chunk_idx, chunk in enumerate(chunks):
+            loop_runner = _make_runner(_text_loop)
+            chunk_sid = sid if len(chunks) == 1 else f"{sid}-chunk{chunk_idx}"
+            adapter_config = {
+                **cfg.model_dump(),
+                "spread_count": chunk["spread_count"],
+                "spreads_meta": chunk["spreads_meta"],
+            }
+            if chunk["chunk_context"]:
+                adapter_config["chunk_context"] = chunk["chunk_context"]
+            chunk_result = await _run_agent(
+                loop_runner,
+                chunk_sid,
+                json.dumps({
+                    "source_text": chunk["text"],
+                    "config": adapter_config,
+                }),
+                output_key="adapted_text",
             )
+            chunk_raw = chunk_result.strip().removeprefix("```json").removesuffix("```").strip()
+            try:
+                chunk_parsed = json.loads(chunk_raw)
+                all_spread_contents.extend(
+                    SpreadContent(**s) for s in chunk_parsed["spreads"]
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Story adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
+                    f"\n\nRaw output:\n{chunk_result[:500]}"
+                )
+
+        state.spread_contents = all_spread_contents
         if len(state.spread_contents) != spread_count:
             raise RuntimeError(
                 f"Story adapter produced {len(state.spread_contents)} spreads "
                 f"but {spread_count} were requested."
             )
+        state.adapted_text = json.dumps({"spreads": [sc.model_dump() for sc in state.spread_contents]})
         gcs.write_json(sid, "adapted", "story.json", data={
             "title": cfg.source.title or "Untitled",
             "author": cfg.source.author or "Unknown",
@@ -279,47 +356,65 @@ async def _run_pipeline(
         gcs.write_text(sid, "pages", "cover.html", content=cover_html)
         await emit("adapting_text", 35, message=f"Story adapted into {spread_count} spreads")
 
-        # ── 3. Build character bible ──────────────────────────────────────────
+        # ── 3+4. Character bible + spread planner in parallel ─────────────────
         await emit("building_character_bible", 36)
-        bible_runner = _make_runner(character_bible_agent)
-        all_text_parts = []
-        for sc in state.spread_contents:
-            if sc.verso_text:
-                all_text_parts.append(sc.verso_text)
-            if sc.recto_text:
-                all_text_parts.append(sc.recto_text)
-        story_text_for_bible = "\n\n".join(all_text_parts)
-        bible_json_str = await _run_agent(
-            bible_runner,
-            sid,
-            json.dumps({
-                "adapted_text": story_text_for_bible,
-                "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
-            }),
-        )
-        bible_json_str = bible_json_str.strip().removeprefix("```json").removesuffix("```").strip()
-        bible_dict = json.loads(bible_json_str)
+
+        async def _run_bible() -> dict:
+            all_text_parts = []
+            for sc in state.spread_contents:
+                if sc.verso_text:
+                    all_text_parts.append(sc.verso_text)
+                if sc.recto_text:
+                    all_text_parts.append(sc.recto_text)
+            runner = _make_runner(character_bible_agent)
+            result = await _run_agent(
+                runner, sid,
+                json.dumps({
+                    "adapted_text": "\n\n".join(all_text_parts),
+                    "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
+                }),
+            )
+            return json.loads(result.strip().removeprefix("```json").removesuffix("```").strip())
+
+        async def _run_planner() -> dict:
+            runner = _make_runner(spread_planner)
+            result = await _run_agent(
+                runner, f"{sid}-planner",
+                json.dumps({
+                    "spreads": [sc.model_dump() for sc in state.spread_contents],
+                    "config": {
+                        "image_spec": cfg.image_spec or "",
+                        "custom_instructions": cfg.custom_instructions or "",
+                        "text_spec": cfg.text_spec or "",
+                    },
+                }),
+            )
+            return json.loads(result.strip().removeprefix("```json").removesuffix("```").strip())
+
+        bible_dict, planner_output = await asyncio.gather(_run_bible(), _run_planner())
         gcs.write_json(sid, "character_bible.json", data=bible_dict)
         state.character_bible = bible_dict  # type: ignore[assignment]
-        await emit("building_character_bible", 40, message="Character bible built")
+        await emit("planning_spreads", 43, message="Character bible and spread plan ready")
 
-    # ── 4. Spread planner — illustration coverage + global typography ──────────
-    await emit("planning_spreads", 41)
-    planner_runner = _make_runner(spread_planner)
-    planner_json_str = await _run_agent(
-        planner_runner,
-        f"{sid}-planner",
-        json.dumps({
-            "spreads": [sc.model_dump() for sc in state.spread_contents],
-            "config": {
-                "image_spec": cfg.image_spec or "",
-                "custom_instructions": cfg.custom_instructions or "",
-                "text_spec": cfg.text_spec or "",
-            },
-        }),
-    )
-    planner_json_str = planner_json_str.strip().removeprefix("```json").removesuffix("```").strip()
-    planner_output = json.loads(planner_json_str)
+    else:
+        # ── 4 (resume). Spread planner only — bible already loaded from GCS ────
+        await emit("planning_spreads", 41)
+        planner_runner = _make_runner(spread_planner)
+        planner_json_str = await _run_agent(
+            planner_runner,
+            f"{sid}-planner",
+            json.dumps({
+                "spreads": [sc.model_dump() for sc in state.spread_contents],
+                "config": {
+                    "image_spec": cfg.image_spec or "",
+                    "custom_instructions": cfg.custom_instructions or "",
+                    "text_spec": cfg.text_spec or "",
+                },
+            }),
+        )
+        planner_output = json.loads(
+            planner_json_str.strip().removeprefix("```json").removesuffix("```").strip()
+        )
 
     layout_spec = {
         "font_family": planner_output.get("font_family", "Georgia, serif"),

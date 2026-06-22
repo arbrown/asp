@@ -90,6 +90,28 @@ PACING
 If `custom_instructions` is provided (recurring motifs, character rules, hidden objects),
 honour them in the _instructions fields. Never let them bleed into _text fields.
 
+────────────────────────────────────────────
+LARGE WORKS: CHUNKED ADAPTATION
+────────────────────────────────────────────
+If `config.chunk_context` is present, this `source_text` is one segment of a longer work
+that is being adapted in multiple passes. Honour these fields:
+
+  - `chunk_number` / `total_chunks`: position in the sequence (1-indexed)
+  - `story_position`: "opening", "middle", or "closing" (or "part N of M")
+  - `is_first_chunk`: true if this is the very beginning of the story
+  - `is_last_chunk`: true if this is the final portion
+
+Your task remains the same — produce the spreads listed in `spreads_meta`. However:
+  - If NOT the first chunk: begin mid-story. Do NOT re-introduce characters or
+    re-establish setting. Continue the narrative as if the reader has been following along.
+  - If NOT the last chunk: end at a natural pause, NOT with resolution. The story
+    continues in the next chunk.
+  - If the last chunk: resolve the story arc cleanly.
+
+The `spread_count` and `spreads_meta` refer only to THIS chunk's assigned spreads.
+Their spread_numbers are the original spread_numbers for the full book — preserve them
+exactly so all chunks combine correctly.
+
 If you receive validation feedback in your context, address every issue before responding.
 
 Return ONLY valid JSON. No preamble, no markdown code fences, no commentary.
