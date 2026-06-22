@@ -35,8 +35,17 @@ def _get_overlay_styles(
     text_color: str,
     bg_rgb: str,
     text_position: str = "bottom",
+    text_color_override: str | None = None,
 ) -> dict:
-    """Compute per-spread overlay CSS values from the planner's chosen treatment and position."""
+    """Compute per-spread overlay CSS values from the planner's chosen treatment and position.
+
+    text_color_override: if set (from verifier css_overrides["text_color_hex"]), replaces the
+    layout-spec text color for overlay text only. Lets the verifier prescribe an exact color
+    based on what it actually sees in the image.
+    """
+    if text_color_override:
+        text_color = text_color_override
+
     if text_position == "top":
         grad_dir = "to top"          # gradient is opaque at element top, fades downward
         position_css = "top: 0; left: 0; right: 0;"
@@ -937,6 +946,7 @@ def _build_spread_context(
     font_size: int,
     text_treatment: str = "gradient_dark",
     text_position: str = "bottom",
+    text_color_override: str | None = None,
 ) -> dict:
     """Build a template context dict describing one spread's layout and content."""
     bg = layout_spec.get("background_color", "#fffdf7")
@@ -944,7 +954,8 @@ def _build_spread_context(
     r, g, b = _hex_to_rgb(bg)
     bg_rgb = f"{r},{g},{b}"
     verso_num, recto_num = _spread_page_numbers(spread_number)
-    overlay = _get_overlay_styles(text_treatment, text_color, bg_rgb, text_position)
+    overlay = _get_overlay_styles(text_treatment, text_color, bg_rgb, text_position,
+                                  text_color_override=text_color_override)
 
     images: dict[int, str] = {}
     for idx, data in image_bytes_by_index.items():
@@ -988,10 +999,12 @@ def render_spread_html(
     css_overrides keys (from verifier feedback):
       font_size_scale: float — multiply base font size (e.g. 1.3)
       text_treatment: str — override the planner's chosen treatment
+      text_color_hex: str — override text color for overlay text (e.g. "#ffffff")
     """
     spec = layout_spec or {}
     overrides = css_overrides or {}
     applied_treatment = overrides.get("text_treatment", text_treatment)
+    text_color_override = overrides.get("text_color_hex")
     base_font_size = _FONT_SIZES.get(target_age, 16)
     font_size = int(base_font_size * overrides.get("font_size_scale", 1.0))
     bg = spec.get("background_color", "#fffdf7")
@@ -1001,6 +1014,7 @@ def render_spread_html(
         illustration_plan, image_bytes_by_index, spec, font_size,
         text_treatment=applied_treatment,
         text_position=text_position,
+        text_color_override=text_color_override,
     )
     return _SPREAD_TEMPLATE.render(
         font_family=spec.get("font_family", "Georgia, serif"),

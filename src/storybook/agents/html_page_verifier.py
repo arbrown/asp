@@ -23,25 +23,35 @@ WHAT TO CHECK (in order of importance)
 ────────────────────────────────────────────
 
 1. LEGIBILITY — Is the text readable against the actual image? (MOST IMPORTANT)
-   Look at the image AND the HTML. For text overlaid on an image, there are three treatments:
-   - "gradient_dark": `.text-backdrop` has a dark gradient background — white text. Good default.
-   - "gradient_light": `.text-backdrop` has a light/warm gradient — dark text. For dark images.
-   - "direct": `.text-backdrop` has transparent background — colored text with drop shadow.
+   Look at the image AND the HTML. Identify the zone where text will appear (top quarter or
+   bottom third depending on `text_position`). Assess the actual pixel content of that zone.
+
+   Text treatment options:
+   - "gradient_dark": dark gradient scrim → white text. Safe default for busy/bright images.
+   - "gradient_light": warm/light gradient scrim → dark text. Best for dark/night images.
+   - "direct": no scrim, text color with drop shadow. Only viable on very calm image zones.
+
+   REJECT for genuine legibility failure. ALWAYS include a `text_color_hex` in css_overrides
+   when rejecting for legibility — prescribe the exact color that would work against what you
+   actually see in the image, not just the treatment name:
+   - Image text zone is busy, bright, or multi-colored → "gradient_dark" + "#ffffff" (white)
+   - Image text zone is very dark (dark soil, night sky, deep shadow) → "gradient_dark" + "#ffffff"
+     OR "gradient_light" + the book's text color if the dark gradient disappears into the image
+   - Image text zone is calm, pale, or monochrome → "direct" may work; if not, prescribe a
+     contrasting hex (e.g. "#1a1a1a" on pale backgrounds, "#ffffff" on dark ones)
 
    REJECT only if there is a genuine legibility failure:
-   - The bottom third of the image is bright, busy, or high-contrast AND the chosen treatment
-     is "direct" or "gradient_light" — the text would be unreadable.
-   - The image is very dark throughout AND "gradient_dark" is used — the dark gradient
-     disappears into the dark image. "gradient_light" would be better.
-   - The font size is clearly too small (below minimum for age group).
-   - There is NO backdrop element at all for text sitting over an image.
+   - Text zone is bright/busy AND treatment is "direct" (no scrim) with dark-colored text
+   - Text zone is very dark AND "gradient_dark" scrim is invisible (text unreadable)
+   - Font size clearly too small for the age group
+   - No backdrop element at all for text sitting over an image
 
-   DO NOT reject because of a particular color choice if the text is actually readable.
-   The planner makes intentional choices — only override them when legibility is genuinely broken.
+   DO NOT reject merely because of a color choice — only reject when text is genuinely
+   unreadable against the actual pixel content you see.
 
 2. STRUCTURAL — Does the image appear on the correct side?
    - "full": img spans the full spread (100% width)
-   - "verso": img is on the left page (8.5in); text column on right
+   - "verso": img is on the left page; text column on right
    - "recto": img is on the right page; text column on left
    - Two images ("dual"): one per page
 
@@ -69,20 +79,24 @@ you can name precisely with a concrete fix.
 ────────────────────────────────────────────
 WHEN REJECTING — BE SPECIFIC AND STRUCTURED
 ────────────────────────────────────────────
-`feedback`: exactly what is wrong and why it fails with the actual image content.
+`feedback`: exactly what is wrong. Reference actual image content (colors, objects, contrast).
+  Example: "The bottom third shows dark brown soil and the child's brown boots. Dark green text
+  is nearly invisible against this background."
 
-`suggested_fix`: plain English description of the remedy.
+`suggested_fix`: plain English description of the full remedy, including what color to use.
+  Example: "Switch to gradient_dark treatment with white (#ffffff) text."
 
-`css_overrides`: a JSON-serializable dict with any of these keys to fix the issue:
-  - "text_treatment": "gradient_dark" — switch to dark gradient scrim with white text
-                                        (use when image is bright/busy in the text zone)
-  - "text_treatment": "gradient_light" — switch to light/warm gradient, dark text
-                                         (use when image is very dark throughout)
-  - "text_treatment": "direct" — no scrim, colored text with drop shadow
-                                  (use when image has calm empty space for text)
-  - "font_size_scale": 1.3 — multiply base font size by this factor (e.g. 1.2–1.5)
+`css_overrides`: a JSON-serializable dict. Always include `text_color_hex` when fixing legibility:
+  - "text_treatment": "gradient_dark" | "gradient_light" | "direct"
+  - "text_color_hex": "#rrggbb" — exact hex color for the text (ALWAYS include when rejecting for
+    legibility). Choose based on what you see:
+      • bright/busy text zone → "#ffffff" (white, pairs with gradient_dark)
+      • very dark image throughout → "#ffffff" with gradient_dark, or book text color with gradient_light
+      • calm pale zone → a dark color like "#1a1a1a" pairs with "direct"
+  - "font_size_scale": 1.3 — multiply base font size (e.g. 1.2–1.5)
 
-Example css_overrides: {"text_treatment": "gradient_dark"}
+Example: {"text_treatment": "gradient_dark", "text_color_hex": "#ffffff"}
+Example: {"text_treatment": "gradient_light", "text_color_hex": "#2c1a0e"}
 
 CRITICAL — YOU MUST CALL A TOOL. Do not write a prose verdict. Do not summarize your
 conclusion in text. The pipeline ignores all text output; only tool calls are processed.
@@ -108,9 +122,12 @@ def reject_layout(
 
     Args:
         feedback: Specific description of what is wrong (reference actual image content).
-        suggested_fix: Plain English remedy.
+        suggested_fix: Plain English remedy including the specific color to use.
         css_overrides: Dict of overrides to apply on re-render.
-            Valid keys: text_treatment ("gradient_dark"|"gradient_light"|"direct"), font_size_scale (float).
+            Valid keys:
+              text_treatment: "gradient_dark" | "gradient_light" | "direct"
+              text_color_hex: "#rrggbb" — exact text color to use (always include for legibility fixes)
+              font_size_scale: float — multiply base font size (e.g. 1.2–1.5)
     """
     tool_context.state["layout_feedback"] = feedback
     tool_context.state["layout_suggested_fix"] = suggested_fix
