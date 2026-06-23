@@ -667,9 +667,23 @@ async def _run_pipeline(
     llm_sem = asyncio.Semaphore(settings.llm_concurrency)
     ref_ready: asyncio.Event = asyncio.Event()
     ref_image: list[bytes] = []
-    completed: list[int] = [0]
+    # Per-spread fractional completion (0.0 - 1.0). Substages bump this so the
+    # progress bar moves through prompt → image → render+verify instead of
+    # jumping when a whole spread completes.
+    spread_frac: dict[int, float] = {}
     # Maps spread_number -> first image bytes for continuity checking
     completed_spread_images: dict[int, bytes] = {}
+
+    def _spread_band_pct() -> int:
+        total = sum(spread_frac.values())
+        return 43 + int(total / max(1, total_spreads) * 48)
+
+    async def _bump(s: int, by: float, message: str = "") -> None:
+        spread_frac[s] = min(1.0, spread_frac.get(s, 0.0) + by)
+        await emit(
+            "generating_image", _spread_band_pct(),
+            spread=s, of=total_spreads, message=message,
+        )
 
     async def _render_and_verify_spread(
         spread_number: int,
@@ -748,8 +762,19 @@ async def _run_pipeline(
         s = spread_content.spread_number
         plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
         illustration_plan = plan.illustration_plan
+        n_entries = max(1, len(illustration_plan))
+        # Per-entry substage weights, summing to 0.55 across all entries; the
+        # remaining 0.45 covers render+verify.
+        prompt_w = 0.10 / n_entries
+        image_w = 0.45 / n_entries
+        render_w = 0.45
 
         image_bytes_by_index: dict[int, bytes] = {}
+
+        await emit(
+            "generating_image", _spread_band_pct(),
+            spread=s, of=total_spreads, message="start",
+        )
 
         for entry in illustration_plan:
             img_idx = entry.image_index
@@ -761,10 +786,8 @@ async def _run_pipeline(
                     ref_image.append(img_bytes)
                     ref_ready.set()
                 log.info("Resume: loaded existing image for spread %d img %d", s, img_idx)
+                await _bump(s, prompt_w + image_w, "cached")
                 continue
-
-            await emit("generating_image", 43 + int(completed[0] / total_spreads * 48),
-                       spread=s, of=total_spreads)
 
             is_first = not ref_image
             prompt_input = json.dumps({
@@ -792,6 +815,7 @@ async def _run_pipeline(
                 gcs.write_text, sid, "prompts", f"spread_{s:02d}_img{img_idx}_prompt.txt",
                 content=image_prompt,
             )
+            await _bump(s, prompt_w, "prompt ready")
 
             img_bytes = await _generate_with_retries(
                 session_id=sid,
@@ -814,15 +838,13 @@ async def _run_pipeline(
                 data=img_bytes, content_type="image/png",
             )
             image_bytes_by_index[img_idx] = img_bytes
+            await _bump(s, image_w, "image ready")
 
             if not ref_image:
                 ref_image.append(img_bytes)
                 ref_ready.set()
 
         completed_spread_images[s] = image_bytes_by_index.get(0, b"")
-        completed[0] += 1
-        pct = 43 + int(completed[0] / total_spreads * 48)
-        await emit("generating_image", pct, spread=s, of=total_spreads, message="done")
 
         spread_html = await _render_and_verify_spread(
             s, spread_content, illustration_plan, image_bytes_by_index
@@ -830,6 +852,7 @@ async def _run_pipeline(
         await asyncio.to_thread(
             gcs.write_text, sid, "spreads", f"spread_{s:02d}.html", content=spread_html
         )
+        await _bump(s, render_w, "done")
 
         return s, image_bytes_by_index
 
@@ -977,7 +1000,6 @@ async def _generate_with_retries(
             if attempt <= settings.image_max_retries:
                 await progress_queue.put({
                     "stage": "image_retry",
-                    "pct": 0,
                     "spread": spread_number,
                     "attempt": attempt,
                     "reason": str(exc),
@@ -1028,7 +1050,6 @@ async def _generate_with_retries(
         if attempt <= settings.image_max_retries:
             await progress_queue.put({
                 "stage": "image_retry",
-                "pct": 0,
                 "spread": spread_number,
                 "attempt": attempt,
                 "reason": result[:200],

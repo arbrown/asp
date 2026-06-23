@@ -79,8 +79,8 @@ export default function ProgressPage() {
       id,
       (e) => {
         setEvents((prev) => [...prev, e]);
-        setPct(e.pct);
-        setStage(e.stage);
+        if (e.pct != null) setPct(e.pct);
+        if (e.stage !== "image_retry") setStage(e.stage);
         if (e.stage === "generating_image" && (e.message === "done" || e.message === "cached") && e.spread != null) {
           tryShowImage(e.spread);
         }
@@ -201,7 +201,9 @@ function EventLine({ event: e }: { event: ProgressEvent }) {
   const isRetry = e.stage === "image_retry";
   const cls = isError ? "text-red-600" : isRetry ? "text-amber-600" : "text-sepia-700";
 
-  let text = `[${e.pct}%] ${STAGE_LABELS[e.stage] ?? e.stage}`;
+  let text = e.pct != null
+    ? `[${e.pct}%] ${STAGE_LABELS[e.stage] ?? e.stage}`
+    : STAGE_LABELS[e.stage] ?? e.stage;
   if (e.spread != null) text += ` — spread ${e.spread}${e.of ? `/${e.of}` : ""}`;
   else if (e.page) text += ` — page ${e.page}${e.of ? `/${e.of}` : ""}`;
   if (e.attempt) text += ` (attempt ${e.attempt})`;

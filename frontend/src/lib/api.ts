@@ -32,7 +32,7 @@ export interface SessionSummary {
 
 export interface ProgressEvent {
   stage: string;
-  pct: number;
+  pct?: number;
   message?: string;
   spread?: number;
   page?: number;

@@ -28,7 +28,7 @@ class SessionResponse(BaseModel):
 class ProgressEvent(BaseModel):
     event: str = "progress"
     stage: str
-    pct: int
+    pct: Optional[int] = None
     message: Optional[str] = None
     spread: Optional[int] = None
     page: Optional[int] = None
