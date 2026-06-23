@@ -66,6 +66,36 @@ export async function getLuckyConfig(): Promise<LuckyConfig> {
   return res.json();
 }
 
+export type ShuffleField = "title_author" | "text_spec" | "image_spec" | "custom_instructions";
+
+export interface ShuffleResponse {
+  title?: string;
+  author?: string;
+  text_spec?: string;
+  image_spec?: string;
+  custom_instructions?: string;
+}
+
+export interface ShuffleRequest {
+  field: ShuffleField;
+  title?: string;
+  author?: string;
+  target_age?: string;
+  text_spec?: string;
+  image_spec?: string;
+  custom_instructions?: string;
+}
+
+export async function shuffleField(req: ShuffleRequest): Promise<ShuffleResponse> {
+  const res = await fetch(`${BASE}/shuffle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function createSession(config: SessionConfig): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from storybook.agents.pipeline import run_pipeline
 from storybook.api.models import CreateSessionRequest, SessionResponse
 from storybook.db import store
-from storybook.models import PipelineState
+from storybook.models import ACTIVE_AGE_RANGES, PipelineState
 from storybook.tools import gcs
 
 log = logging.getLogger(__name__)
@@ -25,91 +25,69 @@ _queues: dict[str, asyncio.Queue] = {}
 _tasks: dict[str, asyncio.Task] = {}
 
 
-_LUCKY_PROMPT = """You are a wildly creative children's book art director with encyclopedic knowledge \
-of world literature and art history. Generate a surprising, one-of-a-kind storybook configuration \
-by selecting a real public domain literary work and giving it an unexpected artistic treatment.
+_LUCKY_PROMPT = """You are a children's-book art director picking ONE storybook config.
 
-VARY WIDELY across these dimensions each time:
+Choose a real public-domain source and an unexpected artistic treatment. Surprise me.
 
-SOURCE WORKS — pick from any era and culture, not just fairy tales:
-Epic poetry (Homer, Virgil, Dante, Milton), Romantic poetry (Keats, Shelley, Byron, Pushkin, Goethe), \
-Lyric poetry (Emily Dickinson, Walt Whitman, Matsuo Bashō, Li Bai, Rumi), \
-Myths (Greek, Norse, Hindu, Egyptian, Aztec, Celtic), \
-Fables (Aesop, La Fontaine, Panchatantra, Jataka Tales), \
-Folk tales (1001 Nights, Slavic, African, Japanese, Native American), \
-Adventure (Jules Verne, Robert Louis Stevenson, H.G. Wells), \
-Satire (Voltaire's Candide, Swift's Gulliver, Carroll's Alice), \
-Gothic (Poe, Stoker, Shelley), Nature (Thoreau, John Muir), etc.
+CRITICAL: vary `target_age` widely across runs. The 5 bands are 2-3, 4-5, 6-7, 8-9, 10-12.
+Pick the band that genuinely fits the source you chose. Toddler picture books and simple
+animal tales are 2-3 or 4-5. Aesop's shorter fables, Beatrix Potter, simple folk tales
+land at 4-5 or 6-7. Adventure abridgements and richer myths land at 8-9 or 10-12. Do NOT
+default to the oldest band — most of these sources should be adapted DOWN to the child.
 
-ART STYLES — be HIGHLY specific, pick something unexpected:
-- Risograph printing, strict 3-color palette, visible grain and halftone dots
-- Medieval illuminated manuscript with gilded geometric borders and flat tempera
-- 1930s Soviet constructivist poster art with diagonal composition and bold sans-serif
-- Japanese Taisho-era woodblock (shin-hanga) with bokashi gradients and kiwame seal
-- Mexican Oaxacan folk art, amate bark paper texture, Zapotec pattern borders
-- Art Nouveau poster (Mucha-esque), flowing hair merging with botanical frames
-- Norwegian rosemaling, symmetrical C-scroll florals on deep indigo grounds
-- Persian/Mughal miniature, lapis and gold, intricate geometric tile borders
-- Lino-cut with rough uneven edges, 2 colors max, no gradients
-- Stained glass, heavy black leading lines, pure jewel-tone fills, no shading
-- Scandinavian mid-century (Elsa Beskow-style), mushroom tones, soft gouache
-- Silhouette papercut, solid black figures on single vivid background color
-- Byzantine mosaic, tesserae visible, gold leaf ground, frontal figures
-- Naive/outsider folk art, flattened perspective, pure unmixed colors, pattern fills
-- 1970s psychedelic, surreal scale, organic lettering, impossible architecture
+SOURCES — mix of registers, not just adult literature:
+- Picture-friendly: Aesop, Beatrix Potter, Brothers Grimm, Hans Christian Andersen,
+  Anansi tales, Nasreddin Hodja, Jataka Tales, single Mother Goose rhymes,
+  short fables from any tradition.
+- Mid-grade: Just So Stories (Kipling), The Wind in the Willows (a single chapter),
+  Norse / Greek / Hindu / Egyptian myths (one episode), 1001 Nights single tales,
+  La Fontaine, Wilde's fairy tales, A Child's Garden of Verses.
+- Older: Homer / Virgil / Dante (one episode), Pushkin, Carroll, Verne, Wells,
+  Stevenson, Poe, Whitman, Bashō, Rumi, Li Bai, Dickinson.
+Treat all of these as ABRIDGEABLE — even Dante can land at 8-9 if you pick one canto and
+strip the theology.
 
-PAGE LAYOUT & TYPOGRAPHY — pick one layout and one typography direction and work them into image_spec:
-Layouts (pick one):
-- Full-bleed illustration as page background with the story text in a semi-transparent panel at the bottom
-- Illustration fills the top two-thirds; text sits beneath in a clean band
-- Illustration occupies the left half; text runs in a narrow column on the right
-- Text floats at the top of the page; illustration fills everything below
-- Illustration on the right half; text on the left in a contrasting color band
+ART STYLE — be hyper-specific, one direction per run. A few seeds (do not just rotate
+these — riff on them):
+risograph 3-color; illuminated manuscript with gilded borders; Soviet constructivist
+poster; Taisho-era woodblock (shin-hanga); Oaxacan folk art on amate bark; Art Nouveau
+(Mucha); Norwegian rosemaling; Persian/Mughal miniature; lino-cut, 2 colors max;
+stained glass with heavy leading; Scandinavian mid-century gouache (Beskow); silhouette
+papercut; Byzantine mosaic; naive/outsider folk art; 1970s psychedelic.
 
-Typography & color (pick one):
-- Deep jewel-tone page (navy, forest, burgundy) with white or cream text
-- Warm sepia/parchment background with ink-brown text; aged-paper feel
-- High-contrast black page with bright single-color illustration accents and white text
-- Pastel ground with a bold decorative display font for the story text
-- Cream background with a tall elegant serif; subtle colored drop caps on first word of each page
-- Kraft paper texture, hand-lettered style text, earthy palette
-- Bright white with a single vivid accent color used consistently for text highlights
+LAYOUT + TYPOGRAPHY — pick one of each and weave them naturally into `image_spec`:
+- Layout: full-bleed-with-text-panel | top-2/3-image / bottom-text | left-image / right-text
+  | text-band-top / image-below | right-image / left-text-on-color
+- Type+ground: jewel-tone with cream text | sepia parchment with ink-brown text | black
+  page with white text and one vivid accent | pastel ground with a bold display face |
+  cream ground with tall serif and colored drop caps | kraft paper hand-lettered |
+  bright white with one vivid accent color for highlights
 
-CUSTOM INSTRUCTIONS — vary the approach each time. Do NOT default to a recurring motif on every page. \
-Choose ONE of these strategies at random:
+CUSTOM INSTRUCTIONS — pick ONE strategy (do not stack):
+A. No motif. 2-3 sentences on emotional arc, narrative voice, and what to foreground.
+B. One light motif: a subtle recurring element on some (not all) pages.
+C. One strong rule: a character catchphrase (quote it), a named hidden object, or an
+   ongoing count. Keep to ONE rule.
+D. Character voice + story beats: one character's distinctive speech, plus the emotional
+   beats the adaptation should hit.
 
-Strategy A (no motif — pure story focus): Give 2-3 sentences that define the emotional arc, \
-the narrative voice, and which part of the source work to foreground. No recurring visual gimmick.
-
-Strategy B (one light motif): A single subtle recurring element — a color, an animal glimpsed in the \
-background, or an object that appears on a few (not all) pages when it fits naturally. Plus a story-focus sentence.
-
-Strategy C (one strong motif): One vivid, specific rule that shapes every spread: a character catchphrase \
-(quote it), a hidden object (name it precisely), or an ongoing count. Keep it to one rule only.
-
-Strategy D (character voice + story arc): Define one character's distinctive personality or speech \
-pattern, then give the emotional beats the adaptation should hit across its pages.
-
-Be bold, specific, and surprising — pick something the user would never have thought of themselves. \
-Mix unexpected source+style pairings (e.g. Moby Dick in Byzantine mosaic; Aesop in Soviet propaganda style). \
-Actively avoid combinations you may have generated before.
-
-Return JSON with these exact fields:
-- title: exact title as it appears on Project Gutenberg
-- author: author's name
-- target_age: one of "4-5", "6-8", or "9-12" (match to source complexity)
+Return JSON:
+- title, author: exact title and author as they appear on Project Gutenberg
+- target_age: literal "2-3" | "4-5" | "6-7" | "8-9" | "10-12" (vary widely!)
 - page_count: integer between 10 and 20
-- text_spec: literary/narrative form for the adaptation (1-3 sentences, or empty string for prose)
-- image_spec: exactly 2-3 sentences — hyper-specific art direction PLUS the chosen page layout \
-  and typography direction woven in naturally
-- custom_instructions: 2-4 sentences using whichever strategy you chose above
+- text_spec: 1-3 sentences describing the form, or "" for plain prose
+- image_spec: 2-3 sentences combining art direction + layout + typography
+- custom_instructions: 2-4 sentences in your chosen strategy
 """
+
+
+AgeLiteral = Literal["2-3", "4-5", "6-7", "8-9", "10-12"]
 
 
 class _LuckyOutput(BaseModel):
     title: str
     author: str
-    target_age: str
+    target_age: AgeLiteral
     page_count: int
     text_spec: str
     image_spec: str
@@ -126,7 +104,9 @@ def _generate_lucky() -> dict:
         model=settings.model_fast,
         contents=_LUCKY_PROMPT,
         config=gtypes.GenerateContentConfig(
-            temperature=1.9,
+            # 1.3 keeps the surprise but produces clean JSON on the first try; 1.9 was
+            # spending a lot of latency on retries.
+            temperature=1.3,
             response_mime_type="application/json",
             response_schema=_LuckyOutput,
         ),
@@ -140,6 +120,166 @@ async def lucky() -> dict:
         return await asyncio.to_thread(_generate_lucky)
     except Exception as exc:
         log.exception("Lucky generation failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Shuffle: per-field re-rolls ───────────────────────────────────────────────
+
+ShuffleField = Literal[
+    "title_author",
+    "text_spec",
+    "image_spec",
+    "custom_instructions",
+]
+
+
+class ShuffleRequest(BaseModel):
+    field: ShuffleField
+    title: str = ""
+    author: str = ""
+    target_age: str = ""
+    text_spec: str = ""
+    image_spec: str = ""
+    custom_instructions: str = ""
+
+
+class ShuffleResponse(BaseModel):
+    # Only the fields touched by the shuffle are populated. Caller merges.
+    title: Optional[str] = None
+    author: Optional[str] = None
+    text_spec: Optional[str] = None
+    image_spec: Optional[str] = None
+    custom_instructions: Optional[str] = None
+
+
+def _shuffle_context(req: ShuffleRequest) -> str:
+    """Build a 'what we know so far' block for field-specific prompts."""
+    bits = []
+    if req.title or req.author:
+        bits.append(f"Title: {req.title or '(unset)'} — Author: {req.author or '(unset)'}")
+    if req.target_age:
+        bits.append(f"Target age: {req.target_age}")
+    if req.text_spec and req.field != "text_spec":
+        bits.append(f"Text spec: {req.text_spec}")
+    if req.image_spec and req.field != "image_spec":
+        bits.append(f"Image spec: {req.image_spec}")
+    if req.custom_instructions and req.field != "custom_instructions":
+        bits.append(f"Custom instructions: {req.custom_instructions}")
+    return "\n".join(bits) if bits else "(nothing set yet — pick freely)"
+
+
+class _TitleAuthorOut(BaseModel):
+    title: str
+    author: str
+
+
+class _SingleStringOut(BaseModel):
+    value: str
+
+
+_SHUFFLE_TITLE_AUTHOR = """You are picking ONE real public-domain source work for a
+children's book adaptation.
+
+What we know so far about the project:
+{context}
+
+If a target age is given, pick a source the kid in that band would actually enjoy
+(toddlers want short animal tales; 10-12 can take Verne or Pushkin). If a text_spec
+is given (e.g. a poetic form), pick a source compatible with that form. If image_spec
+suggests a culture or era, lean into a source from that tradition.
+
+Return JSON: title (exact title from Project Gutenberg), author. Be surprising —
+don't default to Alice or Peter Rabbit.
+"""
+
+_SHUFFLE_TEXT_SPEC = """You are choosing a literary/narrative form for ONE storybook
+adaptation.
+
+What we know so far:
+{context}
+
+Pick a form that suits the source work and age. Examples:
+- 2-3 / 4-5: simple repetition, refrain, AABB rhyming couplets, short prose with sound words
+- 6-7 / 8-9: ABAB quatrains, free verse, prose with a recurring chorus, limericks
+- 10-12: Onegin stanzas, blank verse, Spenserian stanzas, structured prose with epigraphs
+Or just "" for plain prose if a form would feel forced.
+
+Return JSON: {{ "value": "<1-3 sentence text spec, or empty string>" }}.
+"""
+
+_SHUFFLE_IMAGE_SPEC = """You are choosing the illustration style for ONE storybook.
+
+What we know so far:
+{context}
+
+Pick a hyper-specific, unexpected art direction (2-3 sentences) AND weave in a page
+layout + typography choice. Match the source's culture/era when it would be more
+interesting than to ignore it. A few seed directions to riff on (do not just rotate):
+risograph 3-color; illuminated manuscript; constructivist; shin-hanga woodblock;
+Oaxacan folk art; Mucha-esque Art Nouveau; rosemaling; Mughal miniature; lino-cut;
+stained glass; Beskow mid-century gouache; silhouette papercut; Byzantine mosaic;
+naive folk; 1970s psychedelic.
+
+Return JSON: {{ "value": "<2-3 sentence image spec>" }}.
+"""
+
+_SHUFFLE_CUSTOM = """You are writing CUSTOM INSTRUCTIONS for ONE storybook adaptation.
+
+What we know so far:
+{context}
+
+Pick ONE strategy and write 2-4 sentences:
+A. No motif: emotional arc + narrative voice + what to foreground from the source.
+B. One light motif: a subtle recurring visual element on some (not all) pages.
+C. One strong rule: a quoted catchphrase, named hidden object, or ongoing count.
+D. Character voice + story beats.
+
+Return JSON: {{ "value": "<2-4 sentence custom instructions>" }}.
+"""
+
+
+def _shuffle(req: ShuffleRequest) -> ShuffleResponse:
+    from google import genai
+    from google.genai import types as gtypes
+    from storybook.config import settings
+
+    client = genai.Client(vertexai=True, project=settings.gcp_project_id, location="global")
+    ctx = _shuffle_context(req)
+
+    if req.field == "title_author":
+        prompt = _SHUFFLE_TITLE_AUTHOR.format(context=ctx)
+        schema: type[BaseModel] = _TitleAuthorOut
+    else:
+        tmpl = {
+            "text_spec": _SHUFFLE_TEXT_SPEC,
+            "image_spec": _SHUFFLE_IMAGE_SPEC,
+            "custom_instructions": _SHUFFLE_CUSTOM,
+        }[req.field]
+        prompt = tmpl.format(context=ctx)
+        schema = _SingleStringOut
+
+    response = client.models.generate_content(
+        model=settings.model_fast,
+        contents=prompt,
+        config=gtypes.GenerateContentConfig(
+            temperature=1.3,
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    data = json.loads(response.text)
+
+    if req.field == "title_author":
+        return ShuffleResponse(title=data["title"], author=data["author"])
+    return ShuffleResponse(**{req.field: data["value"]})
+
+
+@router.post("/shuffle", response_model=ShuffleResponse)
+async def shuffle(req: ShuffleRequest) -> ShuffleResponse:
+    try:
+        return await asyncio.to_thread(_shuffle, req)
+    except Exception as exc:
+        log.exception("Shuffle failed for field %s", req.field)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

@@ -13,10 +13,19 @@ class SourceConfig(BaseModel):
 
 
 AGE_PARAMS: dict[str, dict] = {
-    "4-5": {"max_words_per_page": 20, "reading_level": "Pre-K / Primer"},
-    "6-8": {"max_words_per_page": 50, "reading_level": "Grade 1-2"},
-    "9-12": {"max_words_per_page": 100, "reading_level": "Grade 3-5"},
+    # Active 5-bucket scheme (finer at the young end, mirrors publisher segments)
+    "2-3":   {"max_words_per_page": 8,   "reading_level": "Toddler / board book"},
+    "4-5":   {"max_words_per_page": 20,  "reading_level": "Pre-K / Primer"},
+    "6-7":   {"max_words_per_page": 40,  "reading_level": "K-1 / early reader"},
+    "8-9":   {"max_words_per_page": 70,  "reading_level": "Grade 2-3"},
+    "10-12": {"max_words_per_page": 110, "reading_level": "Grade 4-6"},
+    # Legacy keys retained so older sessions resume cleanly
+    "6-8":   {"max_words_per_page": 50,  "reading_level": "Grade 1-2 (legacy)"},
+    "9-12":  {"max_words_per_page": 100, "reading_level": "Grade 3-5 (legacy)"},
 }
+
+# Canonical list for UIs and prompts (excludes legacy)
+ACTIVE_AGE_RANGES: list[str] = ["2-3", "4-5", "6-7", "8-9", "10-12"]
 
 
 class SessionConfig(BaseModel):

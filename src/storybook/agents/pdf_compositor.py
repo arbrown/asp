@@ -9,7 +9,11 @@ from pathlib import Path
 from jinja2 import Template
 from weasyprint import HTML
 
-_FONT_SIZES = {"4-5": 20, "6-8": 16, "9-12": 13}
+_FONT_SIZES = {
+    "2-3": 24, "4-5": 20, "6-7": 17, "8-9": 15, "10-12": 13,
+    # legacy keys
+    "6-8": 16, "9-12": 13,
+}
 
 
 def _md_to_html(text: str) -> str:

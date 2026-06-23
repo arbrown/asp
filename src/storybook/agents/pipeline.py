@@ -39,6 +39,7 @@ from storybook.agents.image_generator import ImageContentPolicyError, ImageToken
 from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
 from storybook.agents.pdf_compositor import (
+    _FONT_SIZES,
     _build_spread_context,
     compose_spread_pdf_publishing,
     compose_spread_pdf_wide,
@@ -852,7 +853,7 @@ async def _run_pipeline(
     for sc in state.spread_contents:
         s = sc.spread_number
         plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
-        font_size = {"4-5": 20, "6-8": 16, "9-12": 13}.get(cfg.target_age, 16)
+        font_size = _FONT_SIZES.get(cfg.target_age, 16)
         ctx = _build_spread_context(
             spread_number=s,
             verso_text=sc.verso_text,

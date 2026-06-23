@@ -1,11 +1,21 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { createSession, getLuckyConfig, listSessions, type SessionConfig, type SessionSummary } from "../lib/api";
+import {
+  createSession,
+  getLuckyConfig,
+  listSessions,
+  shuffleField,
+  type SessionConfig,
+  type SessionSummary,
+  type ShuffleField,
+} from "../lib/api";
 
 const AGE_OPTIONS = [
+  { value: "2-3", label: "Ages 2–3 (Toddler)" },
   { value: "4-5", label: "Ages 4–5 (Pre-K)" },
-  { value: "6-8", label: "Ages 6–8 (Grade 1–2)" },
-  { value: "9-12", label: "Ages 9–12 (Grade 3–5)" },
+  { value: "6-7", label: "Ages 6–7 (K–1)" },
+  { value: "8-9", label: "Ages 8–9 (Grade 2–3)" },
+  { value: "10-12", label: "Ages 10–12 (Grade 4–6)" },
 ];
 
 function sessionLabel(s: SessionSummary): string {
@@ -28,7 +38,7 @@ export default function ConfigPage() {
   }, []);
 
   const [form, setForm] = useState<SessionConfig>({
-    source: { gutenberg_url: "", title: "", author: "" },
+    source: { title: "", author: "" },
     target_age: "4-5",
     page_count: 12,
     language: "en",
@@ -36,6 +46,39 @@ export default function ConfigPage() {
     image_spec: "",
     custom_instructions: "",
   });
+
+  const [shuffling, setShuffling] = useState<ShuffleField | null>(null);
+
+  async function handleShuffle(field: ShuffleField) {
+    setShuffling(field);
+    setError("");
+    try {
+      const result = await shuffleField({
+        field,
+        title: form.source.title,
+        author: form.source.author,
+        target_age: form.target_age,
+        text_spec: form.text_spec,
+        image_spec: form.image_spec,
+        custom_instructions: form.custom_instructions,
+      });
+      setForm((f) => ({
+        ...f,
+        source: {
+          ...f.source,
+          title: result.title ?? f.source.title,
+          author: result.author ?? f.source.author,
+        },
+        text_spec: result.text_spec ?? f.text_spec,
+        image_spec: result.image_spec ?? f.image_spec,
+        custom_instructions: result.custom_instructions ?? f.custom_instructions,
+      }));
+    } catch (err) {
+      setError(`Shuffle failed: ${err}`);
+    } finally {
+      setShuffling(null);
+    }
+  }
 
   function set<K extends keyof SessionConfig>(key: K, value: SessionConfig[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -50,7 +93,6 @@ export default function ConfigPage() {
       const config: SessionConfig = {
         ...form,
         source: {
-          gutenberg_url: form.source.gutenberg_url || undefined,
           title: form.source.title || undefined,
           author: form.source.author || undefined,
         },
@@ -73,7 +115,7 @@ export default function ConfigPage() {
     try {
       const cfg = await getLuckyConfig();
       setForm({
-        source: { gutenberg_url: "", title: cfg.title, author: cfg.author },
+        source: { title: cfg.title, author: cfg.author },
         target_age: cfg.target_age,
         page_count: cfg.page_count,
         language: "en",
@@ -90,7 +132,7 @@ export default function ConfigPage() {
 
   function fillExample() {
     setForm({
-      source: { gutenberg_url: "", title: "Eugene Onegin", author: "Alexander Pushkin" },
+      source: { title: "Eugene Onegin", author: "Alexander Pushkin" },
       target_age: "4-5",
       page_count: 12,
       language: "en",
@@ -142,7 +184,7 @@ export default function ConfigPage() {
             onChange={(e) => {
               const s = pastSessions.find((x) => x.session_id === e.target.value);
               if (s?.config) setForm({
-                source: { gutenberg_url: "", title: "", author: "", ...s.config.source },
+                source: { title: "", author: "", ...s.config.source },
                 target_age: s.config.target_age ?? "4-5",
                 page_count: s.config.page_count ?? 12,
                 language: s.config.language ?? "en",
@@ -164,40 +206,34 @@ export default function ConfigPage() {
 
         {/* Source */}
         <section>
-          <h2 className="text-lg font-semibold text-sepia-900 mb-3">Source Work</h2>
+          <SectionHeader
+            title="Source Work"
+            onShuffle={() => handleShuffle("title_author")}
+            shuffling={shuffling === "title_author"}
+            shuffleHint="Shuffle title and author"
+          />
           <p className="text-sm text-sepia-600 mb-4">
-            Provide a Gutenberg URL, or a title and author — the agent will search automatically.
+            Title and author — the agent will search Project Gutenberg automatically.
           </p>
-          <div className="space-y-3">
-            <Field label="Gutenberg URL (optional)">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Title">
               <input
-                type="url"
-                placeholder="https://www.gutenberg.org/ebooks/NNNN"
-                value={form.source.gutenberg_url}
-                onChange={(e) => set("source", { ...form.source, gutenberg_url: e.target.value })}
+                type="text"
+                placeholder="Eugene Onegin"
+                value={form.source.title}
+                onChange={(e) => set("source", { ...form.source, title: e.target.value })}
                 className={inputCls}
               />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Title">
-                <input
-                  type="text"
-                  placeholder="Eugene Onegin"
-                  value={form.source.title}
-                  onChange={(e) => set("source", { ...form.source, title: e.target.value })}
-                  className={inputCls}
-                />
-              </Field>
-              <Field label="Author">
-                <input
-                  type="text"
-                  placeholder="Alexander Pushkin"
-                  value={form.source.author}
-                  onChange={(e) => set("source", { ...form.source, author: e.target.value })}
-                  className={inputCls}
-                />
-              </Field>
-            </div>
+            <Field label="Author">
+              <input
+                type="text"
+                placeholder="Alexander Pushkin"
+                value={form.source.author}
+                onChange={(e) => set("source", { ...form.source, author: e.target.value })}
+                className={inputCls}
+              />
+            </Field>
           </div>
         </section>
 
@@ -231,7 +267,12 @@ export default function ConfigPage() {
 
         {/* Text spec */}
         <section>
-          <h2 className="text-lg font-semibold text-sepia-900 mb-1">Text Specification</h2>
+          <SectionHeader
+            title="Text Specification"
+            onShuffle={() => handleShuffle("text_spec")}
+            shuffling={shuffling === "text_spec"}
+            shuffleHint="Shuffle text spec (uses title/author/age as context)"
+          />
           <p className="text-sm text-sepia-600 mb-3">
             Optional. Describe any literary form or constraint. The validator will enforce it.
           </p>
@@ -246,7 +287,12 @@ export default function ConfigPage() {
 
         {/* Image spec */}
         <section>
-          <h2 className="text-lg font-semibold text-sepia-900 mb-1">Illustration Style</h2>
+          <SectionHeader
+            title="Illustration Style"
+            onShuffle={() => handleShuffle("image_spec")}
+            shuffling={shuffling === "image_spec"}
+            shuffleHint="Shuffle illustration style (uses title/author/age as context)"
+          />
           <p className="text-sm text-sepia-600 mb-3">
             Optional. Describe the visual style. The image validator will enforce consistency.
           </p>
@@ -261,7 +307,12 @@ export default function ConfigPage() {
 
         {/* Custom instructions */}
         <section>
-          <h2 className="text-lg font-semibold text-sepia-900 mb-1">Custom Instructions</h2>
+          <SectionHeader
+            title="Custom Instructions"
+            onShuffle={() => handleShuffle("custom_instructions")}
+            shuffling={shuffling === "custom_instructions"}
+            shuffleHint="Shuffle custom instructions (uses title/author/age as context)"
+          />
           <p className="text-sm text-sepia-600 mb-3">
             Optional. Story focus, themes to emphasize, characters to highlight, etc.
           </p>
@@ -307,6 +358,58 @@ function GemIcon() {
       {/* Inner highlight */}
       <path d="M10 7.5l2 10 2-10h-4z" fill="white" fillOpacity="0.25" />
     </svg>
+  );
+}
+
+// Two stacked dice in perspective — front die shows three pips, back die shows two.
+function DiceIcon({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {/* back die (offset up-right) */}
+      <rect x="9" y="3" width="11" height="11" rx="2" />
+      <circle cx="13" cy="7" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="16" cy="10" r="0.9" fill="currentColor" stroke="none" />
+      {/* front die — drawn after so it overlaps cleanly */}
+      <rect x="4" y="10" width="11" height="11" rx="2" fill="white" />
+      <circle cx="7.5" cy="13.5" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="9.5" cy="15.5" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="11.5" cy="17.5" r="0.95" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function SectionHeader({
+  title,
+  onShuffle,
+  shuffling,
+  shuffleHint,
+}: {
+  title: string;
+  onShuffle: () => void;
+  shuffling: boolean;
+  shuffleHint: string;
+}) {
+  return (
+    <div className="flex items-center justify-between mb-1">
+      <h2 className="text-lg font-semibold text-sepia-900">{title}</h2>
+      <button
+        type="button"
+        onClick={onShuffle}
+        disabled={shuffling}
+        title={shuffleHint}
+        aria-label={shuffleHint}
+        className="p-1.5 rounded-md text-sepia-400 hover:text-sepia-900 hover:bg-sepia-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {shuffling ? (
+          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path strokeLinecap="round" d="M12 3a9 9 0 1 0 9 9" />
+          </svg>
+        ) : (
+          <DiceIcon />
+        )}
+      </button>
+    </div>
   );
 }
 

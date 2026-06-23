@@ -61,10 +61,16 @@ TEXT RULES (applies to verso_text and recto_text)
   text (a shout, a title, a key word). Use sparingly. These will be rendered as HTML
   <strong> and <em> tags — do not use any other markup.
 
-Age guidelines for text:
-- 4-5: Pre-K. Very short sentences. Concrete, simple language. Rhyme welcome.
-- 6-8: Grade 1-2. Simple sentences. Some descriptive language. Light vocabulary.
-- 9-12: Grade 3-5. Richer vocabulary. Metaphors welcome. More complex sentences.
+Age guidelines for text (the active bands; legacy 6-8 ≈ 6-7, 9-12 ≈ 10-12):
+- 2-3:   Toddler / board book. ≤8 words per page. Naming, sound words, single
+         actions ("The cat sleeps."). Rhythm and repetition above all.
+- 4-5:   Pre-K. Very short sentences. Concrete, simple language. Rhyme welcome.
+- 6-7:   K-1 / early reader. Simple sentences with light dialogue. A small
+         decodable vocabulary, occasional surprising word.
+- 8-9:   Grade 2-3. Compound sentences. Descriptive language, some metaphor.
+         Dialogue can carry character voice.
+- 10-12: Grade 4-6. Richer vocabulary. Metaphors and figurative language welcome.
+         Complex sentences and emotional nuance.
 
 ────────────────────────────────────────────
 ILLUSTRATION INSTRUCTION RULES
