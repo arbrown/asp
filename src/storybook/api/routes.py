@@ -374,18 +374,29 @@ async def get_spread_html(session_id: str, spread_number: int) -> Response:
 
 @router.get("/sessions/{session_id}/spreads/{spread_number}/image/{image_index}")
 async def get_spread_image(session_id: str, spread_number: int, image_index: int) -> Response:
+    """Return one spread image.
+
+    The frontend's progress preview always asks for image_index=0, but the spread
+    planner may produce a single-image spread at index 1 (e.g. coverage="recto"),
+    or a text-only spread with no images at all. Be tolerant: if the requested
+    index isn't there, fall through to the other index before 404-ing. Truly
+    image-less spreads still 404 — there's nothing to show.
+    """
     await _require_session(session_id)
-    try:
-        data, _ = gcs.read_blob(
-            session_id, "images", f"spread_{spread_number:02d}_img{image_index}.png"
+    candidates = [image_index] + [i for i in (0, 1) if i != image_index]
+    for idx in candidates:
+        try:
+            data, _ = gcs.read_blob(
+                session_id, "images", f"spread_{spread_number:02d}_img{idx}.png"
+            )
+        except Exception:
+            continue
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=3600"},
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Spread image not ready")
-    return Response(
-        content=data,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    raise HTTPException(status_code=404, detail="Spread image not ready")
 
 
 @router.get("/sessions/{session_id}/pdf/wide")
