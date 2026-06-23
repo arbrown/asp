@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SourceConfig(BaseModel):
@@ -60,12 +60,48 @@ class SpreadPlan(BaseModel):
     text_position: str = "bottom"  # "top" | "bottom" — where text sits on image overlays
 
 
+class CharacterProfile(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    appearance: str = ""
+    role: str = ""
+    voice_traits: str = ""
+    age_or_era: str = ""
+
+
+class VoiceFingerprint(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    sample_sentences: list[str] = []
+    sentence_length_range: list[int] = [4, 14]
+    pov: str = ""
+    vocabulary_register: str = ""
+    rhythm_notes: str = ""
+
+
 class CharacterBible(BaseModel):
-    style: str
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int = 2
+    style: str = ""
     palette: list[str] = []
-    world: str
-    characters: dict[str, str] = {}
+    world: str = ""
+    characters: dict[str, CharacterProfile] = {}
     recurring_motifs: list[str] = []
+    voice_fingerprint: VoiceFingerprint = Field(default_factory=VoiceFingerprint)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_v1(cls, data: Any) -> Any:
+        """Promote legacy v1 bibles (characters: dict[str, str], no voice_fingerprint)."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("schema_version", 1) >= 2:
+            return data
+        chars = data.get("characters") or {}
+        if chars and all(isinstance(v, str) for v in chars.values()):
+            data["characters"] = {name: {"appearance": desc} for name, desc in chars.items()}
+        data.setdefault("voice_fingerprint", {})
+        data["schema_version"] = 2
+        return data
 
 
 class ValidationResult(BaseModel):
@@ -78,6 +114,7 @@ class PipelineState(BaseModel):
     config: SessionConfig
 
     source_text: str = ""
+    draft_text: str = ""
     adapted_text: str = ""
     pages: list[StoryPage] = []
     character_bible: Optional[CharacterBible] = None

@@ -30,8 +30,10 @@ Evaluate on these dimensions:
 1. **Scene accuracy**: Does the image depict the scene described in `illustration_notes`
    (and consistent with the spread text)? Wrong setting or characters is an immediate rejection.
 
-2. **Character consistency**: Do visible characters match their descriptions in
-   `character_bible.characters`? Call out specific discrepancies (wrong hair color,
+2. **Character consistency**: Do visible characters match
+   `character_bible.characters[name].appearance`? (Each character entry is a
+   profile dict — only the `appearance` field is visual; ignore role,
+   voice_traits, age_or_era.) Call out specific discrepancies (wrong hair color,
    wrong clothing, etc.).
 
 3. **Style consistency**: Does the illustration match `character_bible.style`?

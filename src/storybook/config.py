@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     # Text models
     model_adapter: str = "gemini-3.5-flash"
+    # 3.5 Pro hasn't shipped; 3.1 is still under the -preview suffix. Override via env when GA.
+    model_craft: str = "gemini-3.1-pro-preview"
     model_fast: str = "gemini-3.5-flash"
 
     # Image model (Nano Banana 2)
@@ -20,6 +22,10 @@ class Settings(BaseSettings):
     # Retry limits
     text_max_retries: int = 3
     image_max_retries: int = 2
+
+    # Two-pass adaptation: draft → bible → craft re-adapt. Set false to skip the
+    # draft pass and run the legacy single-adapter flow (cheaper, lower craft).
+    text_two_pass: bool = True
 
     # Parallel image generation — max simultaneous generate_image() calls
     image_concurrency: int = 3

@@ -119,7 +119,15 @@ def load_pages(session_id: str) -> list:
 
 
 def load_character_bible(session_id: str) -> dict:
-    return json.loads(read_text(session_id, "character_bible.json"))
+    """Load the character bible, upgrading legacy v1 layouts to v2 on the fly."""
+    data = json.loads(read_text(session_id, "character_bible.json"))
+    if isinstance(data, dict) and data.get("schema_version", 1) < 2:
+        chars = data.get("characters") or {}
+        if chars and all(isinstance(v, str) for v in chars.values()):
+            data["characters"] = {name: {"appearance": desc} for name, desc in chars.items()}
+        data.setdefault("voice_fingerprint", {})
+        data["schema_version"] = 2
+    return data
 
 
 # ── Spread helpers ─────────────────────────────────────────────────────────────

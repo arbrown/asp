@@ -28,7 +28,12 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from storybook.agents.character_bible import character_bible_agent
+from storybook.agents.character_bible import (
+    bible_finalize,
+    bible_merger,
+    bible_seed,
+    character_bible_agent,
+)
 from storybook.agents.html_page_verifier import html_page_verifier
 from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
 from storybook.agents.image_validator import image_validator
@@ -41,8 +46,8 @@ from storybook.agents.pdf_compositor import (
     render_spread_html,
 )
 from storybook.agents.spread_planner import spread_planner
-from storybook.agents.story_adapter import story_adapter
-from storybook.agents.text_validator import text_validator
+from storybook.agents.story_adapter import craft_adapter, draft_adapter, story_adapter
+from storybook.agents.text_validator import make_text_validator
 from storybook.config import settings
 from storybook.models import IllustrationEntry, PipelineState, SessionConfig, SpreadContent, SpreadPlan
 from storybook.tools import gcs
@@ -54,7 +59,15 @@ log = logging.getLogger(__name__)
 
 _text_loop = LoopAgent(
     name="text_adapt_validate",
-    sub_agents=[story_adapter, text_validator],
+    sub_agents=[story_adapter, make_text_validator(name="text_validator_legacy")],
+    max_iterations=settings.text_max_retries + 1,
+)
+
+# Two-pass: craft adapter (Pro) judged by the craft-aware text validator.
+# Distinct validator instance — ADK forbids one LlmAgent having two LoopAgent parents.
+_craft_loop = LoopAgent(
+    name="craft_adapt_validate",
+    sub_agents=[craft_adapter, make_text_validator(name="text_validator_craft")],
     max_iterations=settings.text_max_retries + 1,
 )
 
@@ -116,6 +129,18 @@ def _chunk_source_text(
         })
 
     return chunks
+
+
+# ── JSON cleanup ──────────────────────────────────────────────────────────────
+
+def _strip_json_fence(text: str) -> str:
+    """Trim leading/trailing markdown fences from agent JSON output."""
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.removeprefix("```json").removeprefix("```").strip()
+    if s.endswith("```"):
+        s = s.removesuffix("```").strip()
+    return s
 
 
 # ── Runner helpers ────────────────────────────────────────────────────────────
@@ -210,6 +235,144 @@ def _compute_spreads_meta(page_count: int) -> tuple[int, list[dict]]:
     return spread_count, spreads_meta
 
 
+# ── Two-pass adaptation helpers ───────────────────────────────────────────────
+
+async def _seed_bible_for_chunk(
+    chunk: dict,
+    chunk_idx: int,
+    n_chunks: int,
+    sid: str,
+    cfg: SessionConfig,
+    sem: asyncio.Semaphore,
+) -> dict:
+    """Run bible_seed on one source chunk; return draft bible dict."""
+    chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
+    runner = _make_runner(bible_seed)
+    seed_input: dict = {
+        "source_text": chunk["text"],
+        "config": {
+            "image_spec": cfg.image_spec,
+            "target_age": cfg.target_age,
+            "text_spec": cfg.text_spec,
+        },
+    }
+    if chunk["chunk_context"]:
+        seed_input["chunk_context"] = chunk["chunk_context"]
+    async with sem:
+        result = await _run_agent(
+            runner, f"{chunk_sid}-bibleseed",
+            json.dumps(seed_input),
+            output_key="bible_seed_json",
+        )
+    return json.loads(_strip_json_fence(result))
+
+
+async def _draft_chunk(
+    chunk: dict,
+    chunk_idx: int,
+    n_chunks: int,
+    sid: str,
+    cfg: SessionConfig,
+    sem: asyncio.Semaphore,
+) -> str:
+    """Run draft_adapter (single-shot, structural) on one chunk; return raw JSON text."""
+    chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
+    adapter_config: dict = {
+        **cfg.model_dump(),
+        "spread_count": chunk["spread_count"],
+        "spreads_meta": chunk["spreads_meta"],
+    }
+    if chunk["chunk_context"]:
+        adapter_config["chunk_context"] = chunk["chunk_context"]
+    runner = _make_runner(draft_adapter)
+    async with sem:
+        return await _run_agent(
+            runner, f"{chunk_sid}-draft",
+            json.dumps({"source_text": chunk["text"], "config": adapter_config}),
+            output_key="draft_text",
+        )
+
+
+async def _merge_bibles(seeds: list[dict], sid: str, sem: asyncio.Semaphore) -> dict:
+    """Reconcile per-chunk bible drafts into one canonical bible.
+
+    Single-seed case is a pure pass-through — the merger only earns its keep
+    across multiple chunks.
+    """
+    if len(seeds) == 1:
+        return seeds[0]
+    runner = _make_runner(bible_merger)
+    async with sem:
+        result = await _run_agent(
+            runner, f"{sid}-biblemerge",
+            json.dumps({"seeds": seeds}),
+            output_key="bible_merged_json",
+        )
+    return json.loads(_strip_json_fence(result))
+
+
+async def _craft_chunk(
+    chunk: dict,
+    chunk_idx: int,
+    n_chunks: int,
+    sid: str,
+    cfg: SessionConfig,
+    draft_text: str,
+    bible_dict: dict,
+    sem: asyncio.Semaphore,
+) -> list[SpreadContent]:
+    """Run the craft loop (craft_adapter ↔ text_validator) for one chunk."""
+    chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
+    adapter_config: dict = {
+        **cfg.model_dump(),
+        "spread_count": chunk["spread_count"],
+        "spreads_meta": chunk["spreads_meta"],
+    }
+    if chunk["chunk_context"]:
+        adapter_config["chunk_context"] = chunk["chunk_context"]
+    runner = _make_runner(_craft_loop)
+    async with sem:
+        result = await _run_agent(
+            runner, f"{chunk_sid}-craft",
+            json.dumps({
+                "source_text": chunk["text"],
+                "draft": draft_text,
+                "character_bible": bible_dict,
+                "config": adapter_config,
+            }),
+            output_key="adapted_text",
+        )
+    raw = _strip_json_fence(result)
+    try:
+        parsed = json.loads(raw)
+        return [SpreadContent(**s) for s in parsed["spreads"]]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Craft adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
+            f"\n\nRaw output:\n{result[:500]}"
+        )
+
+
+async def _finalize_bible(
+    merged_bible: dict,
+    spread_contents: list[SpreadContent],
+    sid: str,
+    sem: asyncio.Semaphore,
+) -> dict:
+    """Refresh the bible against the final adapted text; voice_fingerprint frozen."""
+    runner = _make_runner(bible_finalize)
+    async with sem:
+        result = await _run_agent(
+            runner, f"{sid}-biblefinal",
+            json.dumps({
+                "merged_bible": merged_bible,
+                "adapted_spreads": [sc.model_dump() for sc in spread_contents],
+            }),
+            output_key="bible_final_json",
+        )
+    return json.loads(_strip_json_fence(result))
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 async def run_pipeline(
@@ -297,41 +460,86 @@ async def _run_pipeline(
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
         await emit("adapting_text", 15)
         chunks = _chunk_source_text(state.source_text, spread_count, spreads_meta)
-        if len(chunks) > 1:
+        n_chunks = len(chunks)
+        if n_chunks > 1:
             log.info("Source text is large (%d words) — adapting in %d chunks",
-                     len(state.source_text.split()), len(chunks))
+                     len(state.source_text.split()), n_chunks)
 
-        all_spread_contents: list[SpreadContent] = []
-        for chunk_idx, chunk in enumerate(chunks):
-            loop_runner = _make_runner(_text_loop)
-            chunk_sid = sid if len(chunks) == 1 else f"{sid}-chunk{chunk_idx}"
-            adapter_config = {
-                **cfg.model_dump(),
-                "spread_count": chunk["spread_count"],
-                "spreads_meta": chunk["spreads_meta"],
-            }
-            if chunk["chunk_context"]:
-                adapter_config["chunk_context"] = chunk["chunk_context"]
-            chunk_result = await _run_agent(
-                loop_runner,
-                chunk_sid,
-                json.dumps({
-                    "source_text": chunk["text"],
-                    "config": adapter_config,
-                }),
-                output_key="adapted_text",
-            )
-            chunk_raw = chunk_result.strip().removeprefix("```json").removesuffix("```").strip()
-            try:
-                chunk_parsed = json.loads(chunk_raw)
-                all_spread_contents.extend(
-                    SpreadContent(**s) for s in chunk_parsed["spreads"]
+        text_sem = asyncio.Semaphore(settings.llm_concurrency)
+
+        if settings.text_two_pass:
+            # ── 2a. Parallel: per-chunk draft + per-chunk bible seed ──────
+            await emit("adapting_text", 18, message="Drafting and seeding bible per chunk")
+            draft_tasks = [
+                _draft_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
+                for i in range(n_chunks)
+            ]
+            seed_tasks = [
+                _seed_bible_for_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
+                for i in range(n_chunks)
+            ]
+            results = await asyncio.gather(*draft_tasks, *seed_tasks)
+            draft_texts: list[str] = list(results[:n_chunks])
+            seeds: list[dict] = list(results[n_chunks:])
+
+            state.draft_text = "\n\n---chunk---\n\n".join(draft_texts)
+            gcs.write_text(sid, "adapted", "draft.txt", content=state.draft_text)
+
+            # ── 2b. Merge per-chunk bible seeds into one canonical bible ──
+            await emit("building_character_bible", 22, message="Merging bibles across chunks")
+            bible_dict = await _merge_bibles(seeds, sid, text_sem)
+            gcs.write_json(sid, "character_bible.json", data=bible_dict)
+            state.character_bible = bible_dict  # type: ignore[assignment]
+
+            # ── 2c. Parallel: per-chunk craft loop (craft_adapter ↔ validator)
+            await emit("adapting_text", 25, message="Craft pass per chunk")
+            craft_tasks = [
+                _craft_chunk(
+                    chunks[i], i, n_chunks, sid, cfg,
+                    draft_text=draft_texts[i],
+                    bible_dict=bible_dict,
+                    sem=text_sem,
                 )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Story adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
-                    f"\n\nRaw output:\n{chunk_result[:500]}"
+                for i in range(n_chunks)
+            ]
+            chunk_spread_lists = await asyncio.gather(*craft_tasks)
+            all_spread_contents: list[SpreadContent] = []
+            for spreads in chunk_spread_lists:
+                all_spread_contents.extend(spreads)
+        else:
+            # Legacy single-pass adaptation (text_two_pass=False)
+            all_spread_contents = []
+            for chunk_idx, chunk in enumerate(chunks):
+                loop_runner = _make_runner(_text_loop)
+                chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
+                adapter_config = {
+                    **cfg.model_dump(),
+                    "spread_count": chunk["spread_count"],
+                    "spreads_meta": chunk["spreads_meta"],
+                }
+                if chunk["chunk_context"]:
+                    adapter_config["chunk_context"] = chunk["chunk_context"]
+                chunk_result = await _run_agent(
+                    loop_runner,
+                    chunk_sid,
+                    json.dumps({
+                        "source_text": chunk["text"],
+                        "config": adapter_config,
+                    }),
+                    output_key="adapted_text",
                 )
+                chunk_raw = _strip_json_fence(chunk_result)
+                try:
+                    chunk_parsed = json.loads(chunk_raw)
+                    all_spread_contents.extend(
+                        SpreadContent(**s) for s in chunk_parsed["spreads"]
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Story adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
+                        f"\n\nRaw output:\n{chunk_result[:500]}"
+                    )
+            bible_dict = {}
 
         state.spread_contents = all_spread_contents
         if len(state.spread_contents) != spread_count:
@@ -356,10 +564,17 @@ async def _run_pipeline(
         gcs.write_text(sid, "pages", "cover.html", content=cover_html)
         await emit("adapting_text", 35, message=f"Story adapted into {spread_count} spreads")
 
-        # ── 3+4. Character bible + spread planner in parallel ─────────────────
+        # ── 3+4. Bible finalize (two-pass) or seed (single-pass) + planner ────
         await emit("building_character_bible", 36)
 
         async def _run_bible() -> dict:
+            if settings.text_two_pass:
+                # Refresh roster against final adapted text; voice_fingerprint stays
+                # frozen from the merge.
+                return await _finalize_bible(
+                    bible_dict, state.spread_contents, sid, text_sem,
+                )
+            # Legacy single-pass: seed a bible from the final adapted text.
             all_text_parts = []
             for sc in state.spread_contents:
                 if sc.verso_text:
@@ -370,11 +585,16 @@ async def _run_pipeline(
             result = await _run_agent(
                 runner, sid,
                 json.dumps({
-                    "adapted_text": "\n\n".join(all_text_parts),
-                    "config": {"image_spec": cfg.image_spec, "target_age": cfg.target_age},
+                    "source_text": "\n\n".join(all_text_parts),
+                    "config": {
+                        "image_spec": cfg.image_spec,
+                        "target_age": cfg.target_age,
+                        "text_spec": cfg.text_spec,
+                    },
                 }),
+                output_key="bible_seed_json",
             )
-            return json.loads(result.strip().removeprefix("```json").removesuffix("```").strip())
+            return json.loads(_strip_json_fence(result))
 
         async def _run_planner() -> dict:
             runner = _make_runner(spread_planner)

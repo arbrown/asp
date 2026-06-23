@@ -1,18 +1,26 @@
-"""Story Adapter — rewrites source text for children, producing per-spread content."""
+"""Story Adapter agents.
+
+Two agents share the same structural contract:
+- `draft_adapter`  — single-shot structural draft (Flash). Output key: `draft_text`.
+- `craft_adapter`  — bible-aware re-adaptation with craft rules (Pro). Output key: `adapted_text`.
+
+`craft_adapter` runs inside a LoopAgent with `text_validator`; validation feedback is
+read from session state on retry.
+"""
 
 from google.adk.agents import LlmAgent
 
 from storybook.config import settings
 
-INSTRUCTION = """You are a master children's literature adapter.
+# ── Shared structural rules ───────────────────────────────────────────────────
 
-You will receive a JSON object containing:
-- `source_text`: the original public-domain work
+BASE_INSTRUCTION = """You will receive a JSON object containing:
+- `source_text`: the original public-domain work (or one chunk of it)
 - `config`: session configuration including:
   - `target_age`: age range string ("4-5", "6-8", "9-12")
   - `text_spec`: optional poetic/format constraint
   - `custom_instructions`: optional recurring motifs, hidden objects, character rules
-  - `spread_count`: total number of two-page spreads in the book (integer)
+  - `spread_count`: total number of two-page spreads (integer)
   - `spreads_meta`: array describing each spread, e.g.:
       [
         {"spread_number": 0, "has_verso": false, "has_recto": true},
@@ -20,6 +28,8 @@ You will receive a JSON object containing:
         ...
         {"spread_number": 8, "has_verso": true,  "has_recto": false}
       ]
+  - `chunk_context` (optional): present only when the source is being adapted in
+    multiple chunks; see LARGE WORKS section below.
 
 Your task: adapt the source work into a children's storybook, distributing content
 across two-page spreads. Think in SPREAD UNITS — a spread is a left page (verso)
@@ -112,14 +122,110 @@ The `spread_count` and `spreads_meta` refer only to THIS chunk's assigned spread
 Their spread_numbers are the original spread_numbers for the full book — preserve them
 exactly so all chunks combine correctly.
 
-If you receive validation feedback in your context, address every issue before responding.
-
 Return ONLY valid JSON. No preamble, no markdown code fences, no commentary.
 """
 
-story_adapter = LlmAgent(
-    name="story_adapter",
+
+# ── Draft adapter — fast structural pass (Flash) ──────────────────────────────
+
+DRAFT_INSTRUCTION = (
+    "You are a children's literature adapter writing a STRUCTURAL DRAFT.\n\n"
+    "This is the first of two passes. Focus on getting the bones right: spread "
+    "distribution, blank-side compliance, pacing, scene boundaries, and faithful "
+    "narrative coverage of the source. Voice and polish come in pass two. Write "
+    "clearly and correctly; do not over-stylize.\n\n"
+    + BASE_INSTRUCTION
+)
+
+
+draft_adapter = LlmAgent(
+    name="draft_adapter",
     model=settings.model_adapter,
-    instruction=INSTRUCTION,
+    instruction=DRAFT_INSTRUCTION,
+    output_key="draft_text",
+)
+
+
+# ── Craft rules layered on top for the polished pass ──────────────────────────
+
+CRAFT_RULES = """────────────────────────────────────────────
+CRAFT RULES — voice, cadence, sparkle
+────────────────────────────────────────────
+This is the polished pass. Make the prose feel like a beloved children's storybook
+read aloud at bedtime. Apply these rules to every non-null verso_text / recto_text:
+
+1. **Cadence variety**: Vary sentence length within
+   `character_bible.voice_fingerprint.sentence_length_range`. Never two consecutive
+   sentences of the same length on a single spread. Open with the shortest beat
+   when a scene needs a punch.
+
+2. **Sensory grounding**: At least one concrete sensory detail per spread, and
+   spread your senses across the book — not all visual. Sound, smell, touch, and
+   taste anchor a scene faster than another adjective for "the forest".
+
+3. **Voice anchor**: Match the rhythm, register, and POV of
+   `character_bible.voice_fingerprint.sample_sentences`. Absorb the *sound* of
+   those samples; do not pastiche their content.
+
+4. **Music**: Use a small refrain, alliteration, or repeated phrase where the
+   moment invites it. Not on every spread — when a child would want to hear it
+   again.
+
+5. **Vocabulary**: Match
+   `character_bible.voice_fingerprint.vocabulary_register`. For ages 6-8 and
+   above you may place one stretch-word per spread that earns its keep.
+
+6. **No dead prose**: Cut bureaucratic phrasing, dead metaphors, and "began to X"
+   constructions. Verbs do the work.
+
+7. **Character voice**: When a character speaks, lean on the cues in
+   `character_bible.characters[name].voice_traits` — speech rhythm, vocabulary,
+   habits of address. Speech should sound different across characters.
+
+8. **Bible adherence**: Characters appearing in your spreads must match the
+   appearance, age, and role in `character_bible.characters`. Never introduce a
+   character not present in the bible without strong narrative cause.
+
+9. **text_spec override**: If `config.text_spec` prescribes a poetic form
+   (rhyme scheme, meter, syllable count), THE FORM TAKES PRECEDENCE. Suspend any
+   craft rule that fights the form — cadence variety, vocabulary register, even
+   sentence-length variation if the form fixes them.
+
+10. **Use the draft**: A `draft` field is provided — your previous structural
+    pass. Treat it as a scaffold. Keep its spread layout and pacing; rewrite its
+    prose for voice, sparkle, and bible adherence. Do not re-shuffle the
+    structure unless validation feedback explicitly asks for it.
+"""
+
+
+CRAFT_INSTRUCTION = (
+    "You are a master children's literature adapter writing the POLISHED PASS.\n\n"
+    "You will receive the same JSON envelope as the structural pass, plus two extra "
+    "keys:\n"
+    "  - `draft`: the structural draft produced by the first pass — same spreads JSON shape.\n"
+    "  - `character_bible`: the canonical bible for this story, including a\n"
+    "    `voice_fingerprint` block (sample_sentences, sentence_length_range, pov,\n"
+    "    vocabulary_register, rhythm_notes) and per-character profiles\n"
+    "    (appearance, role, voice_traits, age_or_era).\n\n"
+    "If session state contains `validation_feedback` (from a prior rejection by the "
+    "text validator), address every issue in the `structural` and `craft` arrays "
+    "before responding. Fix structural complaints first, then craft complaints.\n\n"
+    + BASE_INSTRUCTION
+    + "\n\n"
+    + CRAFT_RULES
+)
+
+
+craft_adapter = LlmAgent(
+    name="craft_adapter",
+    model=settings.model_craft,
+    instruction=CRAFT_INSTRUCTION,
     output_key="adapted_text",
 )
+
+
+# ── Backwards-compatible export ───────────────────────────────────────────────
+# Kept so any caller still importing `story_adapter` resolves to the single-pass
+# (legacy) adapter behaviour by routing through draft_adapter. Pipeline uses
+# draft_adapter / craft_adapter directly.
+story_adapter = draft_adapter

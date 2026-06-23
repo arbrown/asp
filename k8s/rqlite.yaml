@@ -19,12 +19,11 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: rqlite
-          image: rqlite/rqlite:8
+          image: rqlite/rqlite:8.43.4
           args:
             - -node-id=node1
             - -http-addr=0.0.0.0:4001
             - -raft-addr=0.0.0.0:4002
-            - /rqlite/file
           ports:
             - name: http
               containerPort: 4001
@@ -49,7 +48,7 @@ spec:
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /status
               port: 4001
             initialDelaySeconds: 15
             periodSeconds: 30
