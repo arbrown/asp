@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Max simultaneous LLM calls (prompt generation + validation combined)
     llm_concurrency: int = 5
 
+    # rqlite database URL — defaults to the k8s ClusterIP service name
+    rqlite_url: str = "http://rqlite:4001"
+
 
 settings = Settings()
 

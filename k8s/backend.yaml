@@ -43,6 +43,8 @@ spec:
               value: "${GCP_PROJECT_ID}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "global"
+            - name: RQLITE_URL
+              value: "http://rqlite:4001"
           resources:
             requests:
               cpu: "500m"

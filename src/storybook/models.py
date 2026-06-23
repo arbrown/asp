@@ -93,3 +93,5 @@ class PipelineState(BaseModel):
     progress_pct: int = 0
     errors: list[str] = []
     trace_url: str = ""
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None

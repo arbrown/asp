@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rqlite
+  namespace: default
+  labels:
+    app: rqlite
+spec:
+  serviceName: rqlite
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rqlite
+  template:
+    metadata:
+      labels:
+        app: rqlite
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: rqlite
+          image: rqlite/rqlite:8
+          args:
+            - -node-id=node1
+            - -http-addr=0.0.0.0:4001
+            - -raft-addr=0.0.0.0:4002
+            - /rqlite/file
+          ports:
+            - name: http
+              containerPort: 4001
+            - name: raft
+              containerPort: 4002
+          volumeMounts:
+            - name: data
+              mountPath: /rqlite/file
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 4001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4001
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rqlite
+  namespace: default
+  labels:
+    app: rqlite
+spec:
+  selector:
+    app: rqlite
+  ports:
+    - name: http
+      port: 4001
+      targetPort: 4001
+  type: ClusterIP

@@ -26,6 +26,8 @@ export interface SessionSummary {
   trace_url?: string;
   errors: string[];
   resumable?: boolean;
+  started_at?: string;
+  finished_at?: string;
 }
 
 export interface ProgressEvent {
@@ -49,6 +51,13 @@ export interface LuckyConfig {
   text_spec: string;
   image_spec: string;
   custom_instructions: string;
+}
+
+export interface ListSessionsParams {
+  status?: string;
+  limit?: number;
+  offset?: number;
+  sort?: string;
 }
 
 export async function getLuckyConfig(): Promise<LuckyConfig> {
@@ -79,8 +88,13 @@ export async function resumeSession(id: string): Promise<SessionSummary> {
   return res.json();
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  const res = await fetch(`${BASE}/sessions`);
+export async function listSessions(params?: ListSessionsParams): Promise<SessionSummary[]> {
+  const url = new URL(`${BASE}/sessions`, window.location.origin);
+  if (params?.status) url.searchParams.set("status", params.status);
+  if (params?.limit !== undefined) url.searchParams.set("limit", String(params.limit));
+  if (params?.offset !== undefined) url.searchParams.set("offset", String(params.offset));
+  if (params?.sort) url.searchParams.set("sort", params.sort);
+  const res = await fetch(url.pathname + url.search);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

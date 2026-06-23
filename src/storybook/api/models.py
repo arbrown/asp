@@ -21,6 +21,8 @@ class SessionResponse(BaseModel):
     trace_url: Optional[str] = None
     errors: list[str] = []
     resumable: bool = False
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
 
 class ProgressEvent(BaseModel):

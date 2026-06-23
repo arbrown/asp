@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from datetime import datetime, timezone
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -11,13 +12,14 @@ from pydantic import BaseModel
 
 from storybook.agents.pipeline import run_pipeline
 from storybook.api.models import CreateSessionRequest, SessionResponse
+from storybook.db import store
 from storybook.models import PipelineState
 from storybook.tools import gcs
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-# In-memory session store — single user, single pod, no persistence needed
+# In-memory store for active sessions — DB is the durable layer
 _sessions: dict[str, PipelineState] = {}
 _queues: dict[str, asyncio.Queue] = {}
 _tasks: dict[str, asyncio.Task] = {}
@@ -141,23 +143,36 @@ async def lucky() -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.post("/sessions", response_model=SessionResponse, status_code=202)
-async def create_session(body: CreateSessionRequest) -> SessionResponse:
-    state = PipelineState(config=body.config)
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _require_session(session_id: str) -> PipelineState:
+    state = _sessions.get(session_id)
+    if state is None:
+        try:
+            state = await store.get_session(session_id)
+        except Exception:
+            log.exception("DB unavailable for session %s", session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return state
+
+
+def _to_session_response(state: PipelineState) -> SessionResponse:
     sid = state.session_id
-
-    q: asyncio.Queue = asyncio.Queue()
-    _sessions[sid] = state
-    _queues[sid] = q
-    _tasks[sid] = asyncio.create_task(_run(sid, state, q))
-
-    await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(state))
-
     return SessionResponse(
         session_id=sid,
         current_stage=state.current_stage,
         progress_pct=state.progress_pct,
         config=state.config,
+        pdf_signed_url=f"/api/v1/sessions/{sid}/pdf" if state.pdf_gcs_uri else None,
+        wide_pdf_url=f"/api/v1/sessions/{sid}/pdf/wide" if state.wide_pdf_gcs_uri else None,
+        trace_url=state.trace_url or None,
+        errors=state.errors,
+        resumable=state.current_stage == "error",
+        started_at=state.started_at,
+        finished_at=state.finished_at,
     )
 
 
@@ -171,47 +186,82 @@ def _session_meta(state: PipelineState) -> dict:
         "wide_pdf_gcs_uri": state.wide_pdf_gcs_uri,
         "trace_url": state.trace_url,
         "errors": state.errors,
+        "started_at": state.started_at,
+        "finished_at": state.finished_at,
     }
+
+
+@router.post("/sessions", response_model=SessionResponse, status_code=202)
+async def create_session(body: CreateSessionRequest) -> SessionResponse:
+    state = PipelineState(config=body.config, started_at=_now())
+    sid = state.session_id
+
+    q: asyncio.Queue = asyncio.Queue()
+    _sessions[sid] = state
+    _queues[sid] = q
+    _tasks[sid] = asyncio.create_task(_run(sid, state, q))
+
+    await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(state))
+    try:
+        await store.upsert_session(state)
+    except Exception:
+        log.exception("Failed to persist new session %s to DB", sid)
+
+    return _to_session_response(state)
 
 
 async def _run(sid: str, state: PipelineState, q: asyncio.Queue, resume: bool = False) -> None:
     try:
         result = await run_pipeline(state, q, resume=resume)
+        result.finished_at = _now()
         _sessions[sid] = result
     except Exception as exc:
         log.exception("Pipeline failed for session %s", sid)
         _sessions[sid].errors.append(str(exc))
         _sessions[sid].current_stage = "error"
+        _sessions[sid].finished_at = _now()
         await q.put({"stage": "error", "pct": 0, "message": str(exc)})
     finally:
         await q.put(None)  # sentinel — stream is done
-        await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(_sessions[sid]))
+        final = _sessions[sid]
+        await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(final))
+        try:
+            await store.upsert_session(final)
+        except Exception:
+            log.exception("Failed to persist completed session %s to DB", sid)
 
 
 @router.post("/sessions/{session_id}/resume", response_model=SessionResponse, status_code=202)
 async def resume_session(session_id: str) -> SessionResponse:
     state = _sessions.get(session_id)
     if state is None:
+        try:
+            state = await store.get_session(session_id)
+        except Exception:
+            log.exception("DB unavailable for resume %s", session_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Re-register in _sessions so the pipeline runner can update it
+    _sessions[session_id] = state
     if state.current_stage not in ("error", "done"):
         raise HTTPException(status_code=409, detail="Session is still running")
 
     state.errors = []
     state.current_stage = "resuming"
     state.progress_pct = 0
+    state.finished_at = None
 
     q: asyncio.Queue = asyncio.Queue()
     _queues[session_id] = q
     _tasks[session_id] = asyncio.create_task(_run(session_id, state, q, resume=True))
 
     await asyncio.to_thread(gcs.save_session_meta, session_id, _session_meta(state))
+    try:
+        await store.upsert_session(state)
+    except Exception:
+        log.exception("Failed to persist resumed session %s to DB", session_id)
 
-    return SessionResponse(
-        session_id=session_id,
-        current_stage=state.current_stage,
-        progress_pct=state.progress_pct,
-        config=state.config,
-    )
+    return _to_session_response(state)
 
 
 @router.get("/sessions/{session_id}/stream")
@@ -251,25 +301,18 @@ async def stream_session(session_id: str) -> StreamingResponse:
 async def get_session(session_id: str) -> SessionResponse:
     state = _sessions.get(session_id)
     if state is None:
+        try:
+            state = await store.get_session(session_id)
+        except Exception:
+            log.exception("DB unavailable for get_session %s", session_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    return SessionResponse(
-        session_id=session_id,
-        current_stage=state.current_stage,
-        progress_pct=state.progress_pct,
-        config=state.config,
-        pdf_signed_url=f"/api/v1/sessions/{session_id}/pdf" if state.pdf_gcs_uri else None,
-        wide_pdf_url=f"/api/v1/sessions/{session_id}/pdf/wide" if state.wide_pdf_gcs_uri else None,
-        trace_url=state.trace_url or None,
-        errors=state.errors,
-        resumable=state.current_stage == "error",
-    )
+    return _to_session_response(state)
 
 
 @router.get("/sessions/{session_id}/pages/{page_number}/html")
 async def get_page_html(session_id: str, page_number: int) -> Response:
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await _require_session(session_id)
     try:
         data = gcs.read_bytes(session_id, "pages", f"page_{page_number:02d}.html")
     except Exception:
@@ -283,9 +326,7 @@ async def get_page_html(session_id: str, page_number: int) -> Response:
 
 @router.get("/sessions/{session_id}/images/{page_number}")
 async def get_page_image(session_id: str, page_number: int) -> Response:
-    state = _sessions.get(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await _require_session(session_id)
     try:
         data, _ = gcs.read_blob(session_id, "images", f"page_{page_number:02d}.png")
     except Exception:
@@ -301,6 +342,11 @@ async def get_page_image(session_id: str, page_number: int) -> Response:
 async def download_pdf(session_id: str) -> Response:
     state = _sessions.get(session_id)
     if state is None:
+        try:
+            state = await store.get_session(session_id)
+        except Exception:
+            pass
+    if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     if not state.pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="PDF not ready")
@@ -314,8 +360,7 @@ async def download_pdf(session_id: str) -> Response:
 
 @router.get("/sessions/{session_id}/spreads/{spread_number}/html")
 async def get_spread_html(session_id: str, spread_number: int) -> Response:
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await _require_session(session_id)
     try:
         data = gcs.read_bytes(session_id, "spreads", f"spread_{spread_number:02d}.html")
     except Exception:
@@ -329,8 +374,7 @@ async def get_spread_html(session_id: str, spread_number: int) -> Response:
 
 @router.get("/sessions/{session_id}/spreads/{spread_number}/image/{image_index}")
 async def get_spread_image(session_id: str, spread_number: int, image_index: int) -> Response:
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await _require_session(session_id)
     try:
         data, _ = gcs.read_blob(
             session_id, "images", f"spread_{spread_number:02d}_img{image_index}.png"
@@ -348,6 +392,11 @@ async def get_spread_image(session_id: str, spread_number: int, image_index: int
 async def download_wide_pdf(session_id: str) -> Response:
     state = _sessions.get(session_id)
     if state is None:
+        try:
+            state = await store.get_session(session_id)
+        except Exception:
+            pass
+    if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     if not state.wide_pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="Wide PDF not ready")
@@ -360,15 +409,38 @@ async def download_wide_pdf(session_id: str) -> Response:
 
 
 @router.get("/sessions", response_model=list[SessionResponse])
-async def list_sessions() -> list[SessionResponse]:
-    return [
-        SessionResponse(
-            session_id=sid,
-            current_stage=s.current_stage,
-            progress_pct=s.progress_pct,
-            config=s.config,
-            errors=s.errors,
-            resumable=s.current_stage == "error",
+async def list_sessions_route(
+    status: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    sort: str = "created_at_desc",
+) -> list[SessionResponse]:
+    db_states: list[PipelineState] = []
+    db_available = True
+    try:
+        db_states = await store.list_sessions(
+            status=status, limit=limit, offset=offset, sort=sort
         )
-        for sid, s in _sessions.items()
-    ]
+    except Exception:
+        log.exception("DB unavailable — falling back to in-memory sessions")
+        db_available = False
+
+    if db_available:
+        # Overlay in-memory state for sessions that are actively running
+        state_map = {s.session_id: s for s in db_states}
+        for sid in list(state_map.keys()):
+            if sid in _sessions:
+                state_map[sid] = _sessions[sid]
+        states = list(state_map.values())
+    else:
+        # Best-effort fallback: filter and sort in Python
+        states = list(_sessions.values())
+        if status:
+            allowed = {s.strip() for s in status.split(",") if s.strip()}
+            states = [s for s in states if s.current_stage in allowed]
+        reverse = sort != "created_at_asc"
+        states.sort(key=lambda s: s.started_at or "", reverse=reverse)
+        if limit is not None:
+            states = states[offset: offset + limit]
+
+    return [_to_session_response(s) for s in states]
