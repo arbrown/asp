@@ -326,16 +326,30 @@ async def get_page_html(session_id: str, page_number: int) -> Response:
 
 @router.get("/sessions/{session_id}/images/{page_number}")
 async def get_page_image(session_id: str, page_number: int) -> Response:
+    """Legacy per-page image route, kept for the History thumbnail.
+
+    Sessions generated before the spread redesign (2026-06-17) wrote per-page
+    files at images/page_NN.png. Sessions after that write per-spread files at
+    images/spread_NN_imgX.png. Try the legacy path first, then fall back to the
+    cover spread for new-format sessions.
+    """
     await _require_session(session_id)
-    try:
-        data, _ = gcs.read_blob(session_id, "images", f"page_{page_number:02d}.png")
-    except Exception:
-        raise HTTPException(status_code=404, detail="Image not ready")
-    return Response(
-        content=data,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    candidates = [
+        f"page_{page_number:02d}.png",
+        "spread_00_img0.png",
+        "spread_00_img1.png",
+    ]
+    for fname in candidates:
+        try:
+            data, _ = gcs.read_blob(session_id, "images", fname)
+        except Exception:
+            continue
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    raise HTTPException(status_code=404, detail="Image not ready")
 
 
 @router.get("/sessions/{session_id}/pdf")
