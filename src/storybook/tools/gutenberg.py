@@ -29,8 +29,7 @@ def search_gutenberg(query: str) -> list[dict]:
     Returns:
         List of dicts with keys: id, title, authors, download_url.
     """
-    resp = httpx.get(_GUTENBERG_SEARCH, params={"search": query}, timeout=15)
-    resp.raise_for_status()
+    resp = _get_with_retries(_GUTENBERG_SEARCH, params={"search": query}, timeout=30)
     results = []
     for book in resp.json().get("results", [])[:5]:
         txt_url = book.get("formats", {}).get("text/plain; charset=utf-8") or \
@@ -57,14 +56,20 @@ def _extract_book_id(url: str) -> str | None:
     return None
 
 
-def _fetch_with_retries(url: str, max_attempts: int = 3) -> str:
+def _get_with_retries(
+    url: str,
+    *,
+    params: dict | None = None,
+    timeout: float = 60,
+    max_attempts: int = 3,
+) -> httpx.Response:
     """GET a URL, retrying transport errors and 5xx responses with backoff."""
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = httpx.get(url, follow_redirects=True, timeout=60)
+            resp = httpx.get(url, params=params, follow_redirects=True, timeout=timeout)
             resp.raise_for_status()
-            return resp.text
+            return resp
         except httpx.HTTPStatusError as exc:
             last_exc = exc
             if exc.response.status_code < 500 or attempt == max_attempts:
@@ -101,7 +106,7 @@ def fetch_gutenberg_url(url: str) -> str:
     ebook_match = re.search(r"gutenberg\.org/ebooks/(\d+)", url)
     if ebook_match:
         book_id = ebook_match.group(1)
-        meta = httpx.get(f"{_GUTENBERG_SEARCH}{book_id}/", timeout=15).json()
+        meta = _get_with_retries(f"{_GUTENBERG_SEARCH}{book_id}/", timeout=30).json()
         formats = meta.get("formats", {})
         url = (
             formats.get("text/plain; charset=utf-8")
@@ -110,7 +115,7 @@ def fetch_gutenberg_url(url: str) -> str:
         )
 
     try:
-        text = _fetch_with_retries(url)
+        text = _get_with_retries(url).text
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
         book_id = _extract_book_id(url)
         if not book_id:
@@ -122,7 +127,7 @@ def fetch_gutenberg_url(url: str) -> str:
             "Gutenberg primary URL failed (%s) — falling back to cache URL %s",
             exc, cache_url,
         )
-        text = _fetch_with_retries(cache_url)
+        text = _get_with_retries(cache_url).text
 
     # Strip Gutenberg header and footer
     if m := _STRIP_HEADER_RE.search(text):
