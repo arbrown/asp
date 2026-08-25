@@ -6,7 +6,7 @@ A multi-agent pipeline that adapts public-domain literature into illustrated chi
 
 ## System Overview
 
-All agents run inside a **single ADK process** (one GKE pod / Cloud Run instance). ADK's `SequentialAgent` and `ParallelAgent` composability handles orchestration in-process — no inter-agent network hops.
+All agents run inside a **single backend process** (one GKE pod running FastAPI and the ADK execution runtime). ADK's `LlmAgent` and `LoopAgent` composability handles orchestration in-process with `asyncio` queues and concurrency semaphores — no inter-agent network hops.
 
 The core design principle for custom constraints (poetry forms, art styles, character consistency) is:
 > **Free-form natural language specs, injected into prompts, evaluated by the LLM.** No hardcoding of rules. Adding a new constraint requires zero code changes — the user just describes it.
@@ -15,288 +15,268 @@ The core design principle for custom constraints (poetry forms, art styles, char
 graph TD
     ReactUI["⚛️ React Frontend\n(separate GKE service)"]
     API["🔌 API Service\n(FastAPI + SSE streaming)"]
-    Orch["🎭 Orchestrator\n(ADK SequentialAgent)"]
+    Orch["🎭 Pipeline Orchestrator\n(asyncio + ADK Agents)"]
 
-    subgraph AgentPipeline ["ADK Agent Pipeline — single process"]
-        Fetch["📚 Literature Fetcher\n(URL or Gutenberg search — agent decides)"]
-        Adapt["✏️ Story Adapter\n(gemini-3.1-pro-preview)"]
-        TextVal["✅ Text Validator\n(gemini-3.5-flash)\nevaluates against text_spec"]
-        PageSplit["📄 Page Splitter\n(deterministic)"]
-        CharBible["📖 Character Bible Agent\n(gemini-3.1-pro-preview)\ngenerates visual consistency doc"]
-        IllPrompt["🎨 Illustration Prompter\n(gemini-3.5-flash)\ninjects character_bible + image_spec"]
-        ImgGen["🖼️ Image Generator\n(gemini-3.1-flash-image — Nano Banana 2)"]
-        ImgVal["🔍 Image Validator\n(gemini-3.5-flash vision)\nchecks against bible + prior pages"]
-        PDF["📕 PDF Compositor\n(weasyprint)"]
+    subgraph AgentPipeline ["ADK Agent Pipeline — single backend process"]
+        Fetch["📚 Literature Fetcher\n(Gutenberg search + mirror/OPDS rotation)"]
+        
+        subgraph TwoPassAdaptation ["Two-Pass Adaptation & Bible Generation"]
+            DraftAdapt["✏️ Draft Adapter\n(gemini-3.5-flash)\nfast structural draft"]
+            BibleSeed["🌱 Bible Seeder\n(gemini-3.1-pro-preview)\nper-chunk draft bible"]
+            BibleMerge["🔀 Bible Merger\n(gemini-3.1-pro-preview)\nreconciles multi-chunk seeds"]
+            CraftAdapt["🖋️ Craft Adapter\n(gemini-3.1-pro-preview)\nbible-aware spread adaptation"]
+            TextVal["✅ Text Validator\n(gemini-3.5-flash)\nevaluates against text_spec"]
+            FinalBible["📖 Finalize Bible\n(gemini-3.1-pro-preview)\nrefreshes bible against final text"]
+        end
+
+        subgraph SpreadLayout ["Spread & Layout Planning"]
+            SpreadPlan["📐 Spread Planner\n(gemini-3.5-flash)\nplans coverage, aspect ratios, typography"]
+            LayoutExt["🎨 Layout Extractor\n(gemini-3.5-flash)\nderives color & layout directives"]
+        end
+
+        subgraph IllustrationPipeline ["Illustration & Vision Verification (Parallel)"]
+            IllPrompt["🎨 Illustration Prompter\n(gemini-3.5-flash)\ninjects character_bible + image_spec"]
+            ImgGen["🖼️ Image Generator\n(gemini-3.1-flash-image — Nano Banana 2)"]
+            ImgVal["🔍 Image Validator\n(gemini-3.5-flash vision)\nchecks vs bible + spread anchors"]
+            PageVerify["👁️ Spread Layout Verifier\n(gemini-3.5-flash vision)\nverifies rendered HTML legibility"]
+        end
+
+        PDF["📕 PDF Compositor\n(weasyprint + jinja2)"]
     end
 
-    subgraph Storage ["GCS — storybook-artifacts / sessions / {id}"]
-        Orig["original/source_text.txt"]
-        Adapted["adapted/story.json"]
-        Bible["character_bible.json"]
-        Pages["pages/page_N.txt"]
-        Prompts["prompts/page_N_prompt.txt"]
-        Images["images/page_N.png"]
-        Final["final/storybook.pdf"]
+    subgraph Storage ["Durable Storage & Persistence"]
+        subgraph GCS ["GCS — storybook-artifacts / sessions / {id}"]
+            Orig["original/source_text.txt"]
+            Adapted["adapted/story.json"]
+            BibleDoc["character_bible.json"]
+            Spreads["spreads/spread_plan.json"]
+            Prompts["prompts/spread_N_prompt.txt"]
+            Images["images/spread_N.png"]
+            FinalPDF["final/storybook.pdf"]
+        end
+        subgraph DB ["rqlite — Database Cluster (port 4001)"]
+            SessionsTable["sessions table\n(state, metadata, history, errors)"]
+        end
     end
 
-    subgraph VertexAI ["Vertex AI / Gemini Enterprise Agent Platform"]
-        Gemini31Pro["gemini-3.1-pro-preview\n(complex text + bible generation)"]
-        Gemini35Flash["gemini-3.5-flash\n(fast text + vision validation)"]
-        NanoBanana2["gemini-3.1-flash-image\n(Nano Banana 2 — image generation)"]
+    subgraph VertexAI ["Vertex AI / Gemini Enterprise Platform"]
+        Gemini31Pro["gemini-3.1-pro-preview\n(complex craft text + bible generation)\n*Aspirational: gemini-3.5-pro when GA*"]
+        Gemini35Flash["gemini-3.5-flash\n(fast draft, prompts & multimodal vision)"]
+        NanoBanana2["gemini-3.1-flash-image\n(Nano Banana 2 — image generation)\n*Aspirational: gemini-3-pro-image for HD*"]
     end
 
-    ReactUI -->|"POST /storybook\n+ SSE progress stream"| API
-    API -->|"start_session(config)"| Orch
+    ReactUI -->|"POST /api/v1/sessions\n+ SSE progress stream"| API
+    API -->|"persist session state"| SessionsTable
+    API -->|"run_pipeline(config)"| Orch
 
     Orch --> Fetch
     Fetch --> Orig
-    Fetch --> Adapt
+    Fetch --> DraftAdapt
 
-    Adapt --> Adapted
-    Adapt --> TextVal
-    TextVal -->|"pass / retry with specific feedback\ne.g. stanza 3 doesn't scan"| Adapt
+    DraftAdapt --> BibleSeed
+    BibleSeed --> BibleMerge
+    BibleMerge --> BibleDoc
+    BibleMerge --> CraftAdapt
 
-    TextVal --> PageSplit
-    PageSplit --> Pages
-    PageSplit --> CharBible
+    CraftAdapt --> TextVal
+    TextVal -->|"pass / retry with violation feedback"| CraftAdapt
+    CraftAdapt --> FinalBible
+    FinalBible --> BibleDoc
+    CraftAdapt --> Adapted
 
-    CharBible --> Bible
-    CharBible --> IllPrompt
+    CraftAdapt --> SpreadPlan
+    SpreadPlan --> LayoutExt
+    LayoutExt --> Spreads
 
+    SpreadPlan --> IllPrompt
     IllPrompt --> Prompts
     IllPrompt --> ImgGen
 
     ImgGen --> Images
     ImgGen --> ImgVal
-    ImgVal -->|"pass / retry with revised prompt\n+ prior page as reference"| ImgGen
+    ImgVal -->|"pass / retry with revised prompt\n+ anchor reference"| ImgGen
 
-    ImgVal --> PDF
-    PDF --> Final
-    PDF -->|"signed URL"| API
-    API -->|"SSE: done + url"| ReactUI
+    ImgVal --> PageVerify
+    PageVerify --> PDF
+    PDF --> FinalPDF
+    PDF --> Orch
+    Orch -->|"update completed state"| SessionsTable
 
-    Adapt <-->|"API"| Gemini31Pro
-    CharBible <-->|"API"| Gemini31Pro
-    TextVal <-->|"API"| Gemini35Flash
-    IllPrompt <-->|"API"| Gemini35Flash
-    ImgVal <-->|"API"| Gemini35Flash
-    ImgGen <-->|"API"| NanoBanana2
+    DraftAdapt -.-> Gemini35Flash
+    BibleSeed -.-> Gemini31Pro
+    BibleMerge -.-> Gemini31Pro
+    CraftAdapt -.-> Gemini31Pro
+    TextVal -.-> Gemini35Flash
+    FinalBible -.-> Gemini31Pro
+    SpreadPlan -.-> Gemini35Flash
+    LayoutExt -.-> Gemini35Flash
+    IllPrompt -.-> Gemini35Flash
+    ImgGen -.-> NanoBanana2
+    ImgVal -.-> Gemini35Flash
+    PageVerify -.-> Gemini35Flash
 ```
-
----
-
-## Custom Constraint System
-
-Both text and image constraints follow the same pattern: the user writes a plain-English spec, it gets injected into every relevant agent's prompt, and the LLM evaluates conformance. No special-casing in code.
-
-### Text specifications (`text_spec`)
-
-Passed verbatim to the Story Adapter's system prompt and to the Text Validator's evaluation prompt.
-
-**Example — Onegin Stanzas:**
-```
-text_spec: "Write in Onegin stanzas. Each stanza is 14 lines of iambic tetrameter
-with rhyme scheme ABABCCDDEFFEGG. Each page is exactly one complete stanza.
-Do not break stanzas across pages."
-```
-
-The Text Validator runs each adapted page through Gemini with a prompt like:
-> *"Evaluate whether this text conforms to the following specification: {text_spec}. If it does not, return a JSON object with `pass: false` and a `feedback` field listing each violation with line number and specific reason. Be precise enough that the author can fix it on a retry."*
-
-Violations are returned as structured feedback that loops directly back to the Story Adapter for a targeted retry — not a full rewrite.
-
-### Image specifications (`image_spec`)
-
-Free-form style description passed into every Illustration Prompt and Image Validator.
-
-**Examples:**
-```
-image_spec: "Pen and ink with cross-hatching. No color fills. High contrast black and white only."
-image_spec: "Japanese woodblock print style. Bold outlines, flat areas of color, no gradients."
-image_spec: "Loose watercolor wash. Soft edges. Muted earth tones. Impressionistic, not photorealistic."
-```
-
-### Character Bible (`character_bible.json`)
-
-Generated once by the **Character Bible Agent** after text adaptation, before any images. Reads the full adapted text + `image_spec` and produces a structured document:
-
-```json
-{
-  "style": "pen and ink with fine cross-hatching, high contrast, no color",
-  "palette": ["#1a1a1a", "#f5f0e8", "#8b6914"],
-  "world": "Early 19th century rural Russia and St. Petersburg. Birch forests, candlelit dachas, grand ballrooms.",
-  "characters": {
-    "Eugene Onegin": "Tall young Russian nobleman, early 20s. Dark hair swept back from forehead. Sharp, angular jaw. Slightly bored, melancholic expression. Fitted dark coat, high white collar, tall leather boots.",
-    "Tatiana": "Young Russian woman, late teens. Light brown hair worn in two braids. Wide, expressive dark eyes. Simple country dress with embroidered hem. Often shown near windows or outdoors."
-  },
-  "recurring_motifs": ["birch trees", "candles", "snow", "letters and quill pens"]
-}
-```
-
-The bible is injected into:
-- Every **Illustration Prompter** call (full character descriptions + style)
-- Every **Image Validator** call (used as the consistency checklist)
-
-### Image Validator — multimodal consistency check
-
-The Image Validator calls `gemini-3.5-flash` with:
-1. The generated image (current page)
-2. Page 1's image (style anchor reference — first page sets the visual standard)
-3. The `character_bible.json`
-4. The `image_spec`
-
-Evaluation prompt:
-> *"Compare the generated image against the character bible and style spec. Check: (1) does each visible character match their physical description? (2) does the overall style match the image_spec? (3) does the style match the reference image? Return `pass: true` or `pass: false` with specific, actionable `feedback` for each violation."*
-
-On failure, the feedback is appended to the original prompt and the Image Generator retries with: *"Previous attempt failed validation: {feedback}. Revised prompt: ..."*
-
----
-
-## Agent Responsibilities
-
-| Agent | Role | Model |
-|---|---|---|
-| **Orchestrator** | Runs the full pipeline; holds session context; emits SSE progress events | ADK `SequentialAgent` |
-| **Literature Fetcher** | URL provided → fetches directly; title/author only → uses Gutenberg search tool; agent chooses; strips boilerplate | HTTP tool + GCS |
-| **Story Adapter** | Rewrites source text for target age group; conforms to `text_spec` if provided | `gemini-3.1-pro-preview` |
-| **Text Validator** | Evaluates adapted text against `text_spec` using LLM; returns structured pass/fail with per-violation feedback | `gemini-3.5-flash` |
-| **Page Splitter** | Segments adapted story into pages per word-count budget; respects stanza/section boundaries from `text_spec` | deterministic |
-| **Character Bible Agent** | Reads full adapted text + `image_spec`; generates `character_bible.json` with character descriptions, style, palette, motifs | `gemini-3.1-pro-preview` |
-| **Illustration Prompter** | Writes a page-specific image prompt; injects character bible + image_spec for full consistency | `gemini-3.5-flash` |
-| **Image Generator** | Calls Nano Banana 2; prompt includes character bible excerpt + image_spec | `gemini-3.1-flash-image` |
-| **Image Validator** | Multimodal: checks generated image against bible, image_spec, and page-1 style anchor; returns structured feedback on retry | `gemini-3.5-flash` (vision) |
-| **PDF Compositor** | Combines page text + images into formatted storybook PDF | `weasyprint` |
-
----
-
-## Session Input Schema
-
-```json
-{
-  "source": {
-    "gutenberg_url": "https://www.gutenberg.org/ebooks/XXXX",
-    "title": "Eugene Onegin",
-    "author": "Alexander Pushkin"
-  },
-  "target_age": "4-5",
-  "page_count": 12,
-  "language": "en",
-  "text_spec": "Write in Onegin stanzas. Each stanza is 14 lines of iambic tetrameter with rhyme scheme ABABCCDDEFFEGG. Each page is exactly one complete stanza.",
-  "image_spec": "Pen and ink with fine cross-hatching. No color fills. High contrast black and white only. 19th century illustration style.",
-  "custom_instructions": "Focus on the Tatiana storyline. Emphasize wonder and nature."
-}
-```
-
-All spec fields are optional. Defaults: no `text_spec` (prose), no `image_spec` (agent chooses style appropriate to the work).
-
-**Age group → pipeline parameters:**
-
-| Age Group | Max words/page | Sentence length | Gemini reading level target |
-|---|---|---|---|
-| 4–5 | 20 | 5–7 words | Pre-K / Primer |
-| 6–8 | 50 | 8–12 words | Grade 1–2 |
-| 9–12 | 100 | 12–20 words | Grade 3–5 |
 
 ---
 
 ## Frontend Architecture
 
-A separate React service with a config form that exposes `text_spec` and `image_spec` as plain text areas — no dropdowns or preset lists, just free-form input.
+The frontend is a lightweight **React 18 SPA** built with Vite, TypeScript, and Tailwind CSS. It communicates with the backend via REST and a persistent Server-Sent Events (SSE) connection.
 
 ```mermaid
 graph LR
-    subgraph Frontend ["React App — storybook-ui"]
-        Home["Home / Gutenberg Search"]
-        Config["Session Config Form\n(age · text_spec · image_spec\n· custom_instructions)"]
-        Progress["Live Progress View\n(SSE stream + stage indicators)"]
-        Viewer["Storybook Viewer\n(page flip · download PDF)"]
-        History["Session History"]
+    subgraph UI ["React SPA (Vite + TypeScript + Tailwind)"]
+        Form["Config Form\n• Title & Author Search\n• 5 Target Age Bands (2-3, 4-5, 6-7, 8-9, 10-12)\n• Spread Count (10-20)\n• Text Spec (free-form)\n• Image Spec (free-form)\n• Custom Instructions (free-form)"]
+        Assistants["Creative Assistants\n• I'm Feeling Lucky (full config dice roll)\n• Per-Section Shuffle Buttons (context-aware)"]
+        Progress["Progress View\n• Monotonic SSE EventSource\n• Live sub-stage progress (0-100%)\n• Error recovery & Resume trigger"]
+        Viewer["Storybook Viewer\n• Two-page spread flip viewer\n• PDF download\n• Raw assets & prompts inspector"]
+        History["History View\n• Past session list from rqlite\n• Status badges & resumability"]
     end
 
-    subgraph API ["storybook-api (FastAPI)"]
-        EP1["POST /sessions"]
-        EP2["GET /sessions/{id}/stream (SSE)"]
-        EP3["GET /sessions/{id}"]
-        EP4["GET /sessions"]
+    subgraph Backend ["FastAPI Backend Routes (/api/v1)"]
+        Lucky["GET /lucky\n(AI-generated complete config)"]
+        Shuffle["POST /shuffle\n(field-specific re-rolls)"]
+        PostSession["POST /sessions\n(starts background async task)"]
+        ResumeSession["POST /sessions/{id}/resume\n(re-triggers errored session)"]
+        StreamSSE["GET /sessions/{id}/stream\n(text/event-stream SSE)"]
+        GetSession["GET /sessions/{id}\n(state + signed asset URLs)"]
+        ListSessions["GET /sessions\n(paginated session history)"]
     end
 
-    Home --> Config
-    Config -->|"POST /sessions"| EP1
-    EP1 -->|"session_id"| Progress
-    Progress -->|"SSE"| EP2
-    Progress -->|"done"| Viewer
-    Viewer -->|"GET /sessions/{id}"| EP3
-    Home --> History
+    Form --> Assistants
+    Assistants -->|"GET /lucky"| Lucky
+    Assistants -->|"POST /shuffle"| Shuffle
+    Form -->|"POST /sessions"| PostSession
+    Progress -->|"GET /sessions/{id}/stream"| StreamSSE
+    Progress -->|"POST /sessions/{id}/resume"| ResumeSession
+    Viewer -->|"GET /sessions/{id}"| GetSession
+    History -->|"GET /sessions"| ListSessions
 ```
 
-**Tech stack:**
+### Key UI Features
+- **5 Age Bands**: Granular targeting for `2-3`, `4-5`, `6-7`, `8-9`, and `10-12` with age-appropriate vocabulary, sentence length, and spread composition.
+- **Creative Exploration**: "I'm Feeling Lucky" produces end-to-end creative seeds, while per-section **Shuffle buttons** regenerate title/author, text forms, illustration specs, or custom rules with prior fields as context.
+- **Monotonic Live Progress**: The SSE stream delivers smooth sub-stage percentages across drafting (0–10%), bible creation (10–20%), craft adaptation (20–40%), layout planning (40–43%), parallel image generation (43–91%), and PDF compilation (91–100%).
+- **Resilience & Resumption**: Errored runs can be resumed in-place via `POST /sessions/{id}/resume`, picking up from the last completed checkpoint.
 
-| Concern | Choice |
-|---|---|
-| Framework | React 19 + TypeScript |
-| Build | Vite |
-| Styling | Tailwind CSS |
-| Real-time | SSE (one-way server push, simpler than WebSockets) |
-| Page flip | `react-pageflip` |
-| State | Zustand |
-| HTTP | `@tanstack/react-query` |
+---
 
-**SSE event shapes:**
-```json
-{ "event": "progress", "stage": "building_character_bible", "pct": 35 }
-{ "event": "progress", "stage": "generating_image", "page": 3, "of": 12, "pct": 58 }
-{ "event": "progress", "stage": "image_retry", "page": 3, "attempt": 2, "reason": "Tatiana's hair color inconsistent with character bible" }
-{ "event": "done", "signed_url": "https://storage.googleapis.com/...", "session_id": "abc123" }
-{ "event": "error", "stage": "text_validation", "message": "Retry limit reached. Stanza 4 does not scan as iambic tetrameter." }
+## Agent Pipeline Details
+
+The pipeline uses a **two-pass adaptation** approach to achieve literary quality and strong visual consistency.
+
 ```
+Literature Fetcher
+      │
+      ▼
+Draft Adapter (gemini-3.5-flash)  ─── Fast structural chunk draft
+      │
+      ▼
+Character Bible Seeder & Merger (gemini-3.1-pro-preview)  ─── Character & visual world definition
+      │
+      ▼
+Craft Adapter (gemini-3.1-pro-preview)  ─── LoopAgent with Text Validator
+      │
+      ▼
+Finalize Bible (gemini-3.1-pro-preview)  ─── Synchronize bible with final craft text
+      │
+      ▼
+Spread Planner & Layout Extractor (gemini-3.5-flash)  ─── Spreads, aspect ratios & typography
+      │
+      ▼
+Illustration Prompter (gemini-3.5-flash)  ─── Injects character bible + art style + spread context
+      │
+      ▼
+Image Generator (gemini-3.1-flash-image)  ─── Parallel generation (concurrency-limited)
+      │
+      ▼
+Image Validator (gemini-3.5-flash vision)  ─── Multimodal check vs bible + style anchor
+      │
+      ▼
+Spread Layout Verifier (gemini-3.5-flash vision)  ─── Multimodal legibility check on rendered HTML
+      │
+      ▼
+PDF Compositor (weasyprint)  ─── Final print-ready PDF
+```
+
+### Agent Roster
+
+| Agent | Role | Model | Validation / Feedback |
+|---|---|---|---|
+| **Literature Fetcher** | Fetches public-domain works via Gutenberg API, OPDS Atom catalog, or mirror rotation (`pglaf.org`, `aleph.gutenberg.org`) | Tool execution / deterministic | Validates non-empty text, strips headers |
+| **Draft Adapter** | Fast structural draft of story text chunk | `gemini-3.5-flash` | Checks word counts and age-appropriate structure |
+| **Character Bible Seeder & Merger** | Extracts character traits, attire, physical features, and setting rules; reconciles multi-chunk seeds | `gemini-3.1-pro-preview` | Structured JSON output conforming to bible schema |
+| **Craft Adapter** | Adapts story into two-page spreads with verse/meter and literary craft rules | `gemini-3.1-pro-preview` *(Aspirational: `gemini-3.5-pro`)* | Paired with Text Validator in ADK `LoopAgent` |
+| **Text Validator** | Evaluates adapted text against `text_spec` constraints (meter, rhyme, vocabulary, cadence) | `gemini-3.5-flash` | Returns structured pass/fail with exact violation notes |
+| **Spread Planner & Layout Extractor** | Determines verso/recto content, illustration coverage (full, verso, recto), aspect ratio (16:9, 3:4, 1:1), and color themes | `gemini-3.5-flash` | Validates layout balance and page count constraints |
+| **Illustration Prompter** | Crafts comprehensive image prompts embedding bible rules, scene cues, and art style | `gemini-3.5-flash` | Injects style anchors and character definitions |
+| **Image Generator** | Generates high-resolution spread illustrations | `gemini-3.1-flash-image` (Nano Banana 2) *(Aspirational: `gemini-3-pro-image`)* | Handled with exponential backoff & content policy recovery |
+| **Image Validator** | Multimodal evaluation against character bible, spread 0/1 style anchor, and previous spread | `gemini-3.5-flash` (vision) | Returns structured pass/fail with corrective prompt feedback |
+| **Spread Layout Verifier** | Multimodal check of rendered HTML spread + image for typography contrast and legibility | `gemini-3.5-flash` (vision) | Checks text placement, overlay readability, and clipping |
+| **PDF Compositor** | Assembles spreads into two-page landscape / portrait PDF with HTML/CSS styling | `weasyprint` + Jinja2 | Validates page geometry and font embedding |
 
 ---
 
 ## Deployment Topology
 
-Three GKE services:
-- `storybook-ui` — React app served by nginx
-- `storybook-api` — FastAPI, SSE stream management
-- `storybook-agent` — ADK pipeline, single pod (personal project)
+The application is deployed to **Google Kubernetes Engine (GKE) Autopilot** in `us-central1`.
 
 ```mermaid
 graph TD
-    Internet --> LB["GKE Ingress"]
-    LB --> UI["storybook-ui\n(React, nginx)"]
-    LB --> APIGW["storybook-api\n(FastAPI)"]
-    APIGW --> AgentPod["storybook-agent\n(ADK pipeline)"]
+    User([User Browser])
 
-    subgraph GCP
-        AgentPod --> Vertex["Vertex AI\n(Gemini 3.x + Nano Banana 2)"]
-        AgentPod --> GCS["Cloud Storage\n(session artifacts)"]
-        AgentPod --> SecretMgr["Secret Manager"]
-        CloudBuild["Cloud Build"] --> AR["Artifact Registry"]
-        AR --> LB
+    subgraph GCP ["Google Cloud Platform (us-central1)"]
+        subgraph GKE ["GKE Autopilot Cluster — storybook-cluster"]
+            Ingress["GKE Managed Ingress\n(storybook-ingress / GCE)"]
+
+            subgraph PodUI ["storybook-ui Pod"]
+                Nginx["nginx (port 80)"]
+                StaticAssets["React SPA Static Files"]
+            end
+
+            subgraph PodBackend ["storybook-backend Pod (Combined API + ADK Runtime)"]
+                FastAPIApp["FastAPI Service (port 8080)\n• REST Endpoints\n• SSE Event Stream"]
+                ADKRuntime["Pipeline Runner (in-process asyncio)\n• ADK Agents & LoopAgents\n• Concurrency Semaphores"]
+                WorkloadID["Workload Identity\n(storybook-backend SA)"]
+            end
+
+            subgraph PodRqlite ["rqlite StatefulSet"]
+                RqliteSvc["rqlite ClusterIP (port 4001)\n• Replicated SQLite Store\n• Durable Session State"]
+            end
+        end
+
+        subgraph GCSBucket ["Cloud Storage Bucket — storybook-artifacts-{id}"]
+            RawSource["/sessions/{id}/original/"]
+            Adaptations["/sessions/{id}/adapted/"]
+            Bibles["/sessions/{id}/character_bible.json"]
+            RenderedImages["/sessions/{id}/images/"]
+            CompiledPDF["/sessions/{id}/final/storybook.pdf"]
+        end
+
+        subgraph VertexGCP ["Vertex AI / Gemini API (global endpoint)"]
+            VertexPro["gemini-3.1-pro-preview\n(Craft Text & Character Bible)"]
+            VertexFlash["gemini-3.5-flash\n(Draft, Prompter, Validator, Verifier)"]
+            VertexImage["gemini-3.1-flash-image\n(Nano Banana 2 Image Gen)"]
+        end
+
+        subgraph ArtifactReg ["Artifact Registry"]
+            BackendImg["storybook-images/backend:latest"]
+            UIImg["storybook-images/frontend:latest"]
+        end
     end
-```
 
----
+    User -->|"HTTPS /"| Ingress
+    Ingress -->|"path: /"| Nginx
+    Ingress -->|"path: /api"| FastAPIApp
 
-## GCS Artifact Layout
+    FastAPIApp <-->|"HTTP /db query & execute"| RqliteSvc
+    FastAPIApp -->|"enqueue session"| ADKRuntime
+    ADKRuntime <-->|"google-genai / Vertex AI SDK"| VertexGCP
+    ADKRuntime <-->|"gcsfs / google-cloud-storage"| GCSBucket
+    WorkloadID -.->|"IAM OAuth Token"| VertexGCP
+    WorkloadID -.->|"Storage Object Admin"| GCSBucket
 
-```
-gs://storybook-artifacts-{project_id}/
-└── sessions/
-    └── {session_id}/
-        ├── config.json
-        ├── original/
-        │   └── source_text.txt
-        ├── adapted/
-        │   └── story.json
-        ├── character_bible.json          ← generated once, used by all image agents
-        ├── pages/
-        │   ├── page_01.txt … page_N.txt
-        ├── prompts/
-        │   ├── page_01_prompt.txt … page_N_prompt.txt
-        ├── images/
-        │   ├── page_01.png … page_N.png  ← page_01 also serves as style anchor
-        └── final/
-            └── storybook.pdf
+    ArtifactReg -.->|"deploy image"| PodUI
+    ArtifactReg -.->|"deploy image"| PodBackend
 ```
 
 ---
@@ -306,73 +286,81 @@ gs://storybook-artifacts-{project_id}/
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as React UI
-    participant API as storybook-api
+    participant UI as React Frontend
+    participant API as FastAPI Backend
+    participant DB as rqlite Store
     participant Agent as ADK Pipeline
-    participant GCS
+    participant GCS as GCS Bucket
     participant Vertex as Vertex AI
 
-    User->>UI: Config form (Eugene Onegin · age 4-5 · Onegin stanzas · pen and ink)
-    UI->>API: POST /sessions {config}
-    API->>Agent: start_session(config)
-    API-->>UI: 200 {session_id}
-    UI->>API: GET /sessions/{id}/stream (SSE)
+    User->>UI: Configure story or click Lucky / Shuffle
+    UI->>API: POST /api/v1/sessions
+    API->>DB: Insert initial session record (pending)
+    API->>Agent: Spawn background asyncio pipeline task
+    API-->>UI: 202 Accepted {session_id}
+    UI->>API: GET /api/v1/sessions/{id}/stream (SSE)
 
-    Agent->>Vertex: Literature Fetcher (URL→direct / title→Gutenberg search)
+    Note over Agent: Phase 1: Literature Acquisition
+    Agent->>Agent: Gutenberg search / mirror rotation
     Agent->>GCS: original/source_text.txt
-    API-->>UI: SSE fetching 10%
+    API-->>UI: SSE fetching_literature (10%)
 
-    loop until text_spec passes
-        Agent->>Vertex: gemini-3.1-pro-preview — adapt + conform to text_spec
-        Agent->>Vertex: gemini-3.5-flash — validate against text_spec
+    Note over Agent: Phase 2: Two-Pass Adaptation & Bible Generation
+    Agent->>Vertex: Draft Adapter (gemini-3.5-flash) — structural chunk draft
+    Agent->>Vertex: Bible Seeder & Merger (gemini-3.1-pro-preview) — build character bible
+    Agent->>GCS: character_bible.json
+    API-->>UI: SSE building_character_bible (20%)
+
+    loop until text_spec passes (LoopAgent max 3 retries)
+        Agent->>Vertex: Craft Adapter (gemini-3.1-pro-preview) — adapt into spreads
+        Agent->>Vertex: Text Validator (gemini-3.5-flash) — validate meter/rules
         Note over Agent,Vertex: Returns structured violation feedback on fail
     end
-    Agent->>GCS: adapted/story.json + pages/
-    API-->>UI: SSE adapting_text 30%
+    Agent->>Vertex: Finalize Bible (gemini-3.1-pro-preview)
+    Agent->>GCS: adapted/story.json
+    API-->>UI: SSE adapting_text (40%)
 
-    Agent->>Vertex: gemini-3.1-pro-preview — build character_bible.json
-    Agent->>GCS: character_bible.json
-    API-->>UI: SSE building_character_bible 40%
+    Note over Agent: Phase 3: Spread Planning & Layout
+    Agent->>Vertex: Spread Planner & Layout Extractor (gemini-3.5-flash)
+    Agent->>GCS: spreads/spread_plan.json
+    API-->>UI: SSE planning_spreads (43%)
 
-    loop For each page 1…N
-        Agent->>Vertex: gemini-3.5-flash — illustration prompt (bible + image_spec injected)
-        Agent->>GCS: prompts/page_N_prompt.txt
-        loop until image passes validation
-            Agent->>Vertex: gemini-3.1-flash-image — generate image
-            Agent->>Vertex: gemini-3.5-flash (vision) — validate vs bible + page_01 anchor
-            Note over Agent,Vertex: Feedback: "Onegin's coat is brown, should be dark"
+    Note over Agent: Phase 4: Parallel Image Generation & Vision Validation
+    par Across Spreads (concurrency limited)
+        Agent->>Vertex: Illustration Prompter (gemini-3.5-flash)
+        Agent->>GCS: prompts/spread_N_prompt.txt
+        loop until image passes validation (max 2 retries)
+            Agent->>Vertex: gemini-3.1-flash-image — generate illustration
+            Agent->>Vertex: gemini-3.5-flash vision — validate vs bible + spread_01 anchor
+            Note over Agent,Vertex: Structured corrective feedback on retry
         end
-        Agent->>GCS: images/page_N.png
-        API-->>UI: SSE generating_image page N
+        Agent->>GCS: images/spread_N.png
+        API-->>UI: SSE generating_image spread N (43% -> 91%)
     end
 
-    Agent->>Agent: weasyprint — compose PDF
+    Note over Agent: Phase 5: Layout Verification & PDF Assembly
+    Agent->>Vertex: Spread Layout Verifier (gemini-3.5-flash vision) — check rendered HTML contrast & legibility
+    Agent->>Agent: weasyprint — compose two-page landscape/portrait PDF
     Agent->>GCS: final/storybook.pdf
-    API-->>UI: SSE done + signed_url
-    UI->>User: Storybook viewer + download
+    Agent->>DB: Update session state to "done"
+    API-->>UI: SSE done (100%) + signed_urls
+    UI->>User: Display storybook viewer + PDF download
 ```
 
 ---
 
-## Resolved Decisions
+## Resolved Decisions & Architecture Annotations
 
-| Decision | Choice |
-|---|---|
-| Pod lifecycle | Single pod — personal project, one user |
-| Gutenberg source | Agent decides: URL → direct fetch; title/author → Gutenberg search tool |
-| Auth | Anonymous — no login required |
-| Image model | `gemini-3.1-flash-image` (Nano Banana 2); `gemini-3-pro-image` (Nano Banana Pro) for higher fidelity |
-| Text model | `gemini-3.1-pro-preview` for adaptation + bible; `gemini-3.5-flash` for everything else |
-| Custom constraints | Free-form `text_spec` + `image_spec` fields; LLM evaluates — no hardcoded rules |
-| Image consistency | Character Bible Agent (runs once) + page-1 style anchor in every validation call |
-| Art style input | Free-form `image_spec` string — no preset dropdown |
-| Retry limits | 3 retries for text validation; 2 retries for image validation |
-| GCP region | `us-central1` (broadest Vertex AI model availability) |
-| GKE cluster type | Autopilot (simpler node management for personal project) |
-| Python version | 3.12 |
-| Terraform state | Local bootstrap → migrate to GCS backend after first apply |
-| Terraform inputs | `project_id` variable required; all asset names human-readable; GCS bucket name = `storybook-artifacts-{random_suffix}` |
-
-## Open Questions
-
-_None — ready to implement._
+| Decision | Implemented Choice | Aspirational / Future State Annotation |
+|---|---|---|
+| **Pod Lifecycle** | Single `storybook-backend` pod running FastAPI + ADK pipeline execution via in-process `asyncio` tasks | Aspirational for multi-tenant scale: decoupled Celery / Cloud Tasks queue with independent autoscaling worker pods |
+| **Gutenberg Source** | Gutenberg search (`gutendex`) with fallback to OPDS Atom catalog (`m.gutenberg.org`) and mirror rotation (`pglaf.org`, `aleph.gutenberg.org`) | Standalone local Gutenberg mirror cache on persistent disk |
+| **Target Age Granularity** | 5 distinct age bands (`2-3`, `4-5`, `6-7`, `8-9`, `10-12`) with calibrated vocabulary and spread geometry | Custom reading-level lexile score tuning |
+| **Creative Controls** | "I'm Feeling Lucky" full-form prompt generation + per-field context-aware Shuffle buttons | Community prompt gallery and fine-tuned style presets |
+| **Image Model** | `gemini-3.1-flash-image` (Nano Banana 2) via `google-genai` Vertex AI SDK | Aspirational: `gemini-3-pro-image` (Nano Banana Pro) when broadly available for higher artistic fidelity |
+| **Craft Text Model** | `gemini-3.1-pro-preview` for craft adaptation, bible seeding/merging/finalizing | Aspirational: `gemini-3.5-pro` when GA |
+| **Fast Text & Vision** | `gemini-3.5-flash` for drafting, text validation, illustration prompts, image validation, and HTML page verification | Continuous upgrade to newest Flash checkpoints |
+| **Layout & Spreads** | True two-page spread architecture (verso/recto) with dynamic aspect ratios (16:9, 3:4, 1:1) and layout verifier | Interactive in-browser visual spread designer |
+| **Session Persistence** | **rqlite** replicated SQLite cluster on GKE for durable relational session state & history | Managed Cloud SQL (PostgreSQL) if enterprise multi-cluster scale is needed |
+| **Object Storage** | Google Cloud Storage (`storybook-artifacts-{id}`) with session folder partitioning | Cloud CDN signed URL caching for high-traffic public reading |
+| **PDF Engine** | `weasyprint` + Jinja2 HTML/CSS templates | Headless Chrome print-to-PDF pipeline for advanced CSS paged media support |
