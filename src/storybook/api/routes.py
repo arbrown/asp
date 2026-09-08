@@ -301,6 +301,8 @@ async def _require_session(session_id: str) -> PipelineState:
 
 def _to_session_response(state: PipelineState) -> SessionResponse:
     sid = state.session_id
+    task = _tasks.get(sid)
+    is_running = task is not None and not task.done()
     return SessionResponse(
         session_id=sid,
         current_stage=state.current_stage,
@@ -310,7 +312,7 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
         wide_pdf_url=f"/api/v1/sessions/{sid}/pdf/wide" if state.wide_pdf_gcs_uri else None,
         trace_url=state.trace_url or None,
         errors=state.errors,
-        resumable=state.current_stage == "error",
+        resumable=state.current_stage == "error" or (state.current_stage != "done" and not is_running),
         started_at=state.started_at,
         finished_at=state.finished_at,
     )
@@ -383,7 +385,8 @@ async def resume_session(session_id: str) -> SessionResponse:
         raise HTTPException(status_code=404, detail="Session not found")
     # Re-register in _sessions so the pipeline runner can update it
     _sessions[session_id] = state
-    if state.current_stage not in ("error", "done"):
+    task = _tasks.get(session_id)
+    if task is not None and not task.done():
         raise HTTPException(status_code=409, detail="Session is still running")
 
     state.errors = []

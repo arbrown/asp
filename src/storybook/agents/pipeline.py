@@ -667,6 +667,19 @@ async def _run_pipeline(
     llm_sem = asyncio.Semaphore(settings.llm_concurrency)
     ref_ready: asyncio.Event = asyncio.Event()
     ref_image: list[bytes] = []
+
+    # Find coordinates (spread_number, image_index) of the first planned illustration in the book.
+    # Spread 0 may be purely typographic, so the first illustration could be on spread 1+.
+    first_image_coord: tuple[int, int] | None = None
+    for sc in sorted(state.spread_contents, key=lambda c: c.spread_number):
+        plan = plan_by_spread.get(sc.spread_number)
+        if plan and plan.illustration_plan:
+            first_image_coord = (sc.spread_number, plan.illustration_plan[0].image_index)
+            break
+
+    if first_image_coord is None:
+        ref_ready.set()
+
     # Per-spread fractional completion (0.0 - 1.0). Substages bump this so the
     # progress bar moves through prompt → image → render+verify instead of
     # jumping when a whole spread completes.
@@ -776,72 +789,78 @@ async def _run_pipeline(
             spread=s, of=total_spreads, message="start",
         )
 
-        for entry in illustration_plan:
-            img_idx = entry.image_index
+        is_ref_spread = first_image_coord is not None and s == first_image_coord[0]
+        try:
+            for entry in illustration_plan:
+                img_idx = entry.image_index
 
-            if resume and await asyncio.to_thread(gcs.spread_image_exists, sid, s, img_idx):
-                img_bytes = await asyncio.to_thread(gcs.load_spread_image_bytes, sid, s, img_idx)
+                if resume and await asyncio.to_thread(gcs.spread_image_exists, sid, s, img_idx):
+                    img_bytes = await asyncio.to_thread(gcs.load_spread_image_bytes, sid, s, img_idx)
+                    image_bytes_by_index[img_idx] = img_bytes
+                    if not ref_image:
+                        ref_image.append(img_bytes)
+                        ref_ready.set()
+                    log.info("Resume: loaded existing image for spread %d img %d", s, img_idx)
+                    await _bump(s, prompt_w + image_w, "cached")
+                    continue
+
+                is_first = (first_image_coord is not None and (s, img_idx) == first_image_coord)
+                prompt_input = json.dumps({
+                    "verso_text": spread_content.verso_text,
+                    "recto_text": spread_content.recto_text,
+                    "verso_instructions": spread_content.verso_instructions,
+                    "recto_instructions": spread_content.recto_instructions,
+                    "spread_number": s,
+                    "total_spreads": total_spreads,
+                    "character_bible": bible_dict,
+                    "config": {"image_spec": cfg.image_spec},
+                    "coverage": entry.coverage,
+                    "aspect_ratio": entry.aspect_ratio,
+                    "illustration_notes": entry.illustration_notes,
+                    "is_first_spread": is_first,
+                })
+
+                prompt_runner = _make_runner(illustration_prompter)
+                async with llm_sem:
+                    image_prompt = await _run_agent(
+                        prompt_runner, f"{sid}-prompt-{s}-{img_idx}", prompt_input,
+                        output_key="image_prompt",
+                    )
+                await asyncio.to_thread(
+                    gcs.write_text, sid, "prompts", f"spread_{s:02d}_img{img_idx}_prompt.txt",
+                    content=image_prompt,
+                )
+                await _bump(s, prompt_w, "prompt ready")
+
+                img_bytes = await _generate_with_retries(
+                    session_id=sid,
+                    spread_number=s,
+                    image_index=img_idx,
+                    image_prompt=image_prompt,
+                    spread_content=spread_content,
+                    illustration_entry=entry,
+                    bible_dict=bible_dict,
+                    image_sem=image_sem,
+                    llm_sem=llm_sem,
+                    ref_ready=ref_ready,
+                    ref_image=ref_image,
+                    progress_queue=progress_queue,
+                    completed_spread_images=completed_spread_images,
+                    is_ref_image=is_first,
+                )
+
+                await asyncio.to_thread(
+                    gcs.write_bytes, sid, "images", f"spread_{s:02d}_img{img_idx}.png",
+                    data=img_bytes, content_type="image/png",
+                )
                 image_bytes_by_index[img_idx] = img_bytes
+                await _bump(s, image_w, "image ready")
+
                 if not ref_image:
                     ref_image.append(img_bytes)
                     ref_ready.set()
-                log.info("Resume: loaded existing image for spread %d img %d", s, img_idx)
-                await _bump(s, prompt_w + image_w, "cached")
-                continue
-
-            is_first = not ref_image
-            prompt_input = json.dumps({
-                "verso_text": spread_content.verso_text,
-                "recto_text": spread_content.recto_text,
-                "verso_instructions": spread_content.verso_instructions,
-                "recto_instructions": spread_content.recto_instructions,
-                "spread_number": s,
-                "total_spreads": total_spreads,
-                "character_bible": bible_dict,
-                "config": {"image_spec": cfg.image_spec},
-                "coverage": entry.coverage,
-                "aspect_ratio": entry.aspect_ratio,
-                "illustration_notes": entry.illustration_notes,
-                "is_first_spread": is_first,
-            })
-
-            prompt_runner = _make_runner(illustration_prompter)
-            async with llm_sem:
-                image_prompt = await _run_agent(
-                    prompt_runner, f"{sid}-prompt-{s}-{img_idx}", prompt_input,
-                    output_key="image_prompt",
-                )
-            await asyncio.to_thread(
-                gcs.write_text, sid, "prompts", f"spread_{s:02d}_img{img_idx}_prompt.txt",
-                content=image_prompt,
-            )
-            await _bump(s, prompt_w, "prompt ready")
-
-            img_bytes = await _generate_with_retries(
-                session_id=sid,
-                spread_number=s,
-                image_index=img_idx,
-                image_prompt=image_prompt,
-                spread_content=spread_content,
-                illustration_entry=entry,
-                bible_dict=bible_dict,
-                image_sem=image_sem,
-                llm_sem=llm_sem,
-                ref_ready=ref_ready,
-                ref_image=ref_image,
-                progress_queue=progress_queue,
-                completed_spread_images=completed_spread_images,
-            )
-
-            await asyncio.to_thread(
-                gcs.write_bytes, sid, "images", f"spread_{s:02d}_img{img_idx}.png",
-                data=img_bytes, content_type="image/png",
-            )
-            image_bytes_by_index[img_idx] = img_bytes
-            await _bump(s, image_w, "image ready")
-
-            if not ref_image:
-                ref_image.append(img_bytes)
+        finally:
+            if is_ref_spread and not ref_ready.is_set():
                 ref_ready.set()
 
         completed_spread_images[s] = image_bytes_by_index.get(0, b"")
@@ -972,6 +991,7 @@ async def _generate_with_retries(
     ref_image: list[bytes],
     progress_queue: asyncio.Queue,
     completed_spread_images: dict[int, bytes],
+    is_ref_image: bool = False,
 ) -> bytes:
     """Generate an image for a spread with validation retries.
 
@@ -1015,7 +1035,7 @@ async def _generate_with_retries(
             continue
 
         style_ref: bytes | None = None
-        if spread_number > 0 or image_index > 0:
+        if not is_ref_image:
             await ref_ready.wait()
             style_ref = ref_image[0] if ref_image else None
 
