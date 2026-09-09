@@ -1,0 +1,17 @@
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: storybook-cert
+  namespace: default
+spec:
+  domains:
+    - pushkin-agent.duckdns.org
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: storybook-frontend-config
+  namespace: default
+spec:
+  redirectToHttps:
+    enabled: true
