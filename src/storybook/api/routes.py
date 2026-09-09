@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
+import random
 from datetime import datetime, timezone
 from typing import AsyncIterator, Literal, Optional
 
@@ -25,9 +27,103 @@ _queues: dict[str, asyncio.Queue] = {}
 _tasks: dict[str, asyncio.Task] = {}
 
 
-_LUCKY_PROMPT = """You are a children's-book art director picking ONE storybook config.
+# Catalogs of diverse art styles, literary traditions, and creative moods for dynamic seed injection
+_ART_STYLE_SEEDS = [
+    "Scandinavian mid-century gouache (in the spirit of Elsa Beskow or Olle Eksell)",
+    "Japanese shin-hanga or ukiyo-e woodblock printing (Kawase Hasui, Hiroshige)",
+    "Oaxacan folk art with bold painted figures on textured amate bark",
+    "Cyanotype botanical blueprint print with stark Prussian blue and white silhouettes",
+    "Persian / Safavid or Mughal miniature painting with intricate floral borders and flat perspective",
+    "1920s Bauhaus geometric collage with bold primary colors and dynamic diagonals",
+    "Medieval illuminated manuscript with rich lapis lazuli, vermilion, and gilded borders",
+    "Linocut printmaking with expressive gouge marks and a strict 2-color spot palette",
+    "Victorian scratchboard / scraperboard with crisp white-on-black engraved linework",
+    "Stained glass panel aesthetic with heavy leaded cames and luminous jewel tones",
+    "Appalachian patchwork quilt and folk textile applique aesthetic",
+    "1970s psychedelic folk art with liquid curves, chromatic vibration, and ink flourishes",
+    "Polish Wycinanki papercutting with symmetrical layered silhouettes and high contrast",
+    "Pointillist / divisionist tempera on unprimed linen canvas",
+    "Sumi-e Japanese ink wash with expressive dry-brush calligraphic strokes and negative space",
+    "Art Nouveau botanical decorative art (flowing organic whiplash curves in the style of Alphonse Mucha)",
+    "Chalk pastel and charcoal on toned raw kraft paper with visible grain",
+    "Papercraft shadowbox with layered cut paper, realistic depth, and directional ambient lighting",
+    "Fauvist expressive painting with vivid, non-naturalistic color blocks and thick impasto strokes",
+    "Risograph printing with overlapping translucent fluorescent inks and subtle grain misregistration",
+    "Byzantine mosaic with shimmering tesserae tiles and gilded halo accents",
+    "Gouache folk painting with naive proportions and decorative borders (Scandinavian rosemaling or Slavic lubok)",
+    "Modern flat vector editorial illustration with exaggerated proportions and retro mid-century palettes",
+    "Early 20th-century travel poster with flat color planes and bold atmospheric lighting",
+]
+
+_TRADITION_SEEDS = [
+    "West African folklore or trickster fables (e.g. Anansi stories, Yoruba fables)",
+    "Celtic, Irish, or Scottish fairy and sea folklore (selkies, changelings, ancient bards)",
+    "Persian or Middle Eastern classical literature (Kalila wa Dimna, 1001 Nights, Attar's Conference of the Birds)",
+    "Indigenous North American or Mesoamerican legends and origin tales",
+    "South Asian classical fables and animal tales (Panchatantra, Buddhist Jataka tales)",
+    "East Asian folklore and classical tales (Chinese folk fables, Japanese Otogizōshi, Korean folktales)",
+    "Scandinavian and Nordic folklore (Asbjørnsen and Moe, Kalevala episodes, troll fables)",
+    "Slavic, Baltic, or Russian fairy tales (Afanasyev, Baba Yaga, Firebird, Vasilisa)",
+    "Classical Greco-Roman mythology or lesser-known Aesop fables",
+    "Latin American, Andean, or Caribbean folklore (folk heroes, rainforest animal myths)",
+    "French Renaissance and 17th-century fables (Jean de La Fontaine, Madame d'Aulnoy)",
+    "19th-century speculative, gothic, or early fantasy (Jules Verne, H.G. Wells, George MacDonald, E. Nesbit)",
+    "Romantic, Victorian, or ancient poetry adapted to storybook narrative (Coleridge, Tennyson, Christina Rossetti, Li Bai, Basho, Rumi)",
+    "American tall tales and frontier folklore (Paul Bunyan, Pecos Bill, John Henry)",
+    "Lesser-known European folk & fairy tales (Brothers Grimm deep cuts, Hans Christian Andersen lesser-known tales)",
+]
+
+_MOOD_SEEDS = [
+    "Whimsical, playful, and sun-drenched with gentle humor",
+    "Dreamy, atmospheric, and quiet with a sense of midnight wonder",
+    "Energetic, rhythmic, and jaunty with rapid momentum",
+    "Eerie, mystical, and shadow-dappled but comforting for children",
+    "Grand, mythical, and heroic with majestic scale",
+    "Tender, heartfelt, and introspective with cozy warmth",
+]
+
+# Rolling recency buffer to prevent repetitive outputs across consecutive calls.
+# Seeded with frequent attractors so they are avoided even on a fresh process start.
+_MAX_LUCKY_HISTORY = 10
+_lucky_history: deque[dict[str, str]] = deque(
+    [
+        {"title": "Just So Stories", "author": "Rudyard Kipling", "style": "Soviet constructivist poster"},
+        {"title": "Alice's Adventures in Wonderland", "author": "Lewis Carroll", "style": "Victorian engraving"},
+        {"title": "The Wind in the Willows", "author": "Kenneth Grahame", "style": "Classic watercolor with ink wash"},
+    ],
+    maxlen=_MAX_LUCKY_HISTORY,
+)
+
+
+def _build_lucky_prompt() -> str:
+    styles_sample = random.sample(_ART_STYLE_SEEDS, 3)
+    tradition_sample = random.sample(_TRADITION_SEEDS, 2)
+    mood = random.choice(_MOOD_SEEDS)
+
+    recent_lines = [
+        f'- "{item["title"]}" by {item["author"]} (Style: {item.get("style", "unspecified")})'
+        for item in _lucky_history
+    ]
+    recency_exclusions = "\n".join(recent_lines)
+
+    return f"""You are a children's-book art director picking ONE storybook config.
 
 Choose a real public-domain source and an unexpected artistic treatment. Surprise me.
+
+CRITICAL EXCLUSIONS — RECENT RUNS (DO NOT REPEAT ANY OF THESE AUTHORS, TITLES, OR STYLES):
+{recency_exclusions}
+- Also strictly avoid: Rudyard Kipling, Alice in Wonderland, and Soviet constructivism.
+
+CREATIVE CATALYSTS FOR THIS RUN (Draw strong inspiration from these; do not default to generic standbys):
+- Literary / Cultural traditions to explore:
+  * {tradition_sample[0]}
+  * {tradition_sample[1]}
+- Art direction sparks (pick one or riff creatively):
+  * {styles_sample[0]}
+  * {styles_sample[1]}
+  * {styles_sample[2]}
+- Tone / Atmosphere spark:
+  * {mood}
 
 CRITICAL: vary `target_age` widely across runs. The 5 bands are 2-3, 4-5, 6-7, 8-9, 10-12.
 Pick the band that genuinely fits the source you chose. Toddler picture books and simple
@@ -35,25 +131,10 @@ animal tales are 2-3 or 4-5. Aesop's shorter fables, Beatrix Potter, simple folk
 land at 4-5 or 6-7. Adventure abridgements and richer myths land at 8-9 or 10-12. Do NOT
 default to the oldest band — most of these sources should be adapted DOWN to the child.
 
-SOURCES — mix of registers, not just adult literature:
-- Picture-friendly: Aesop, Beatrix Potter, Brothers Grimm, Hans Christian Andersen,
-  Anansi tales, Nasreddin Hodja, Jataka Tales, single Mother Goose rhymes,
-  short fables from any tradition.
-- Mid-grade: Just So Stories (Kipling), The Wind in the Willows (a single chapter),
-  Norse / Greek / Hindu / Egyptian myths (one episode), 1001 Nights single tales,
-  La Fontaine, Wilde's fairy tales, A Child's Garden of Verses.
-- Older: Homer / Virgil / Dante (one episode), Pushkin, Carroll, Verne, Wells,
-  Stevenson, Poe, Whitman, Bashō, Rumi, Li Bai, Dickinson.
-Treat all of these as ABRIDGEABLE — even Dante can land at 8-9 if you pick one canto and
-strip the theology.
-
-ART STYLE — be hyper-specific, one direction per run. A few seeds (do not just rotate
-these — riff on them):
-risograph 3-color; illuminated manuscript with gilded borders; Soviet constructivist
-poster; Taisho-era woodblock (shin-hanga); Oaxacan folk art on amate bark; Art Nouveau
-(Mucha); Norwegian rosemaling; Persian/Mughal miniature; lino-cut, 2 colors max;
-stained glass with heavy leading; Scandinavian mid-century gouache (Beskow); silhouette
-papercut; Byzantine mosaic; naive/outsider folk art; 1970s psychedelic.
+SOURCES:
+Pick a real public-domain work or author available on Project Gutenberg that fits one of the
+catalyst traditions above or another unexpected public-domain source.
+Treat all sources as ABRIDGEABLE — e.g. adapt a single chapter, fable, episode, or canto to the chosen age band.
 
 LAYOUT + TYPOGRAPHY — pick one of each and weave them naturally into `image_spec`:
 - Layout: full-bleed-with-text-panel | top-2/3-image / bottom-text | left-image / right-text
@@ -100,9 +181,10 @@ def _generate_lucky() -> dict:
     from storybook.config import settings
 
     client = genai.Client(vertexai=True, project=settings.gcp_project_id, location="global")
+    prompt = _build_lucky_prompt()
     response = client.models.generate_content(
         model=settings.model_fast,
-        contents=_LUCKY_PROMPT,
+        contents=prompt,
         config=gtypes.GenerateContentConfig(
             # 1.3 keeps the surprise but produces clean JSON on the first try; 1.9 was
             # spending a lot of latency on retries.
@@ -111,7 +193,15 @@ def _generate_lucky() -> dict:
             response_schema=_LuckyOutput,
         ),
     )
-    return json.loads(response.text)
+    result = json.loads(response.text)
+    _lucky_history.append(
+        {
+            "title": result.get("title", ""),
+            "author": result.get("author", ""),
+            "style": (result.get("image_spec", "")[:80] + "...") if len(result.get("image_spec", "")) > 80 else result.get("image_spec", ""),
+        }
+    )
+    return result
 
 
 @router.get("/lucky")
@@ -189,7 +279,7 @@ is given (e.g. a poetic form), pick a source compatible with that form. If image
 suggests a culture or era, lean into a source from that tradition.
 
 Return JSON: title (exact title from Project Gutenberg), author. Be surprising —
-don't default to Alice or Peter Rabbit.
+don't default to Alice, Peter Rabbit, or Rudyard Kipling.
 """
 
 _SHUFFLE_TEXT_SPEC = """You are choosing a literary/narrative form for ONE storybook
@@ -215,10 +305,7 @@ What we know so far:
 Pick a hyper-specific, unexpected art direction (2-3 sentences) AND weave in a page
 layout + typography choice. Match the source's culture/era when it would be more
 interesting than to ignore it. A few seed directions to riff on (do not just rotate):
-risograph 3-color; illuminated manuscript; constructivist; shin-hanga woodblock;
-Oaxacan folk art; Mucha-esque Art Nouveau; rosemaling; Mughal miniature; lino-cut;
-stained glass; Beskow mid-century gouache; silhouette papercut; Byzantine mosaic;
-naive folk; 1970s psychedelic.
+{style_seeds}
 
 Return JSON: {{ "value": "<2-3 sentence image spec>" }}.
 """
@@ -249,10 +336,13 @@ def _shuffle(req: ShuffleRequest) -> ShuffleResponse:
     if req.field == "title_author":
         prompt = _SHUFFLE_TITLE_AUTHOR.format(context=ctx)
         schema: type[BaseModel] = _TitleAuthorOut
+    elif req.field == "image_spec":
+        seeds = "; ".join(random.sample(_ART_STYLE_SEEDS, 4))
+        prompt = _SHUFFLE_IMAGE_SPEC.format(context=ctx, style_seeds=seeds)
+        schema = _SingleStringOut
     else:
         tmpl = {
             "text_spec": _SHUFFLE_TEXT_SPEC,
-            "image_spec": _SHUFFLE_IMAGE_SPEC,
             "custom_instructions": _SHUFFLE_CUSTOM,
         }[req.field]
         prompt = tmpl.format(context=ctx)
