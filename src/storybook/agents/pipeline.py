@@ -35,9 +35,19 @@ from storybook.agents.character_bible import (
     character_bible_agent,
 )
 from storybook.agents.html_page_verifier import html_page_verifier
-from storybook.agents.image_generator import ImageContentPolicyError, ImageTokenLimitError, generate_image
-from storybook.agents.image_validator import image_validator
 from storybook.agents.illustration_prompter import illustration_prompter
+from storybook.agents.image_generator import (
+    ImageContentPolicyError,
+    ImageTokenLimitError,
+    generate_image,
+)
+from storybook.agents.image_validator import (
+    check as check_image_validation,
+)
+from storybook.agents.image_validator import (
+    image_validator,
+    record_validation_result,
+)
 from storybook.agents.pdf_compositor import (
     _FONT_SIZES,
     _build_spread_context,
@@ -50,9 +60,22 @@ from storybook.agents.spread_planner import spread_planner
 from storybook.agents.story_adapter import craft_adapter, draft_adapter, story_adapter
 from storybook.agents.text_validator import make_text_validator
 from storybook.config import settings
-from storybook.models import IllustrationEntry, PipelineState, SessionConfig, SpreadContent, SpreadPlan
+from storybook.models import (
+    IllustrationEntry,
+    PipelineState,
+    SessionConfig,
+    SpreadContent,
+    SpreadPlan,
+)
 from storybook.tools import gcs
 from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
+from storybook.tracing import (
+    get_tracer,
+    make_trace_url,
+    trace_agent_call,
+    trace_retry_attempt,
+    trace_stage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +127,9 @@ def _chunk_source_text(
     chunks = []
     for i in range(n_chunks):
         text_start = max(0, i * total_words // n_chunks - (overlap if i > 0 else 0))
-        text_end = min(total_words, (i + 1) * total_words // n_chunks + (overlap if i < n_chunks - 1 else 0))
+        text_end = min(
+            total_words, (i + 1) * total_words // n_chunks + (overlap if i < n_chunks - 1 else 0)
+        )
         chunk_text = " ".join(words[text_start:text_end])
 
         spread_start = round(i * spreads_per_chunk)
@@ -174,46 +199,58 @@ async def _run_agent(
     if subject_image:
         parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=subject_image)))
     if reference_image:
-        parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=reference_image)))
-    if prev_spread_image:
-        parts.append(types.Part(inline_data=types.Blob(mime_type="image/png", data=prev_spread_image)))
-
-    for retry in range(5):
-        sid = session_id if retry == 0 else f"{session_id}-retry{retry}"
-        await runner.session_service.create_session(
-            app_name=runner.app_name,
-            user_id="pipeline",
-            session_id=sid,
+        parts.append(
+            types.Part(inline_data=types.Blob(mime_type="image/png", data=reference_image))
         )
-        try:
-            final = ""
-            async for event in runner.run_async(
-                session_id=sid,
+    if prev_spread_image:
+        parts.append(
+            types.Part(inline_data=types.Blob(mime_type="image/png", data=prev_spread_image))
+        )
+
+    agent_name = getattr(runner.agent, "name", "agent")
+    model = getattr(runner.agent, "model", None)
+    with trace_agent_call(agent_name, model=model):
+        for retry in range(5):
+            sid = session_id if retry == 0 else f"{session_id}-retry{retry}"
+            await runner.session_service.create_session(
+                app_name=runner.app_name,
                 user_id="pipeline",
-                new_message=types.Content(parts=parts),
-            ):
-                if event.is_final_response() and event.content:
-                    for part in event.content.parts:
-                        if part.text:
-                            final = part.text
-
-            if output_key:
-                session = await runner.session_service.get_session(
-                    app_name=runner.app_name,
-                    user_id="pipeline",
+                session_id=sid,
+            )
+            try:
+                final = ""
+                async for event in runner.run_async(
                     session_id=sid,
-                )
-                return (session.state.get(output_key) or final).strip()
-            return final.strip()
+                    user_id="pipeline",
+                    new_message=types.Content(parts=parts),
+                ):
+                    if event.is_final_response() and event.content:
+                        for part in event.content.parts:
+                            if part.text:
+                                final = part.text
 
-        except Exception as exc:
-            msg = str(exc)
-            if ("RESOURCE_EXHAUSTED" in msg or "429" in msg) and retry < 4:
-                wait = 10 * (2 ** retry)
-                log.warning("Rate limited on %s; retrying in %ds (attempt %d/5)", session_id, wait, retry + 1)
-                await asyncio.sleep(wait)
-            else:
-                raise
+                if output_key:
+                    session = await runner.session_service.get_session(
+                        app_name=runner.app_name,
+                        user_id="pipeline",
+                        session_id=sid,
+                    )
+                    return (session.state.get(output_key) or final).strip()
+                return final.strip()
+
+            except Exception as exc:
+                msg = str(exc)
+                if ("RESOURCE_EXHAUSTED" in msg or "429" in msg) and retry < 4:
+                    wait = 10 * (2 ** retry)
+                    log.warning(
+                        "Rate limited on %s; retrying in %ds (attempt %d/5)",
+                        session_id,
+                        wait,
+                        retry + 1,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
 
 # ── Spread numbering ──────────────────────────────────────────────────────────
@@ -382,7 +419,6 @@ async def run_pipeline(
     resume: bool = False,
 ) -> PipelineState:
     """Execute the full storybook pipeline. Writes progress events to progress_queue."""
-    from storybook.tracing import get_tracer, make_trace_url
 
     tracer = get_tracer()
     with tracer.start_as_current_span(
@@ -428,7 +464,9 @@ async def _run_pipeline(
 
             bible_dict = await asyncio.to_thread(gcs.load_character_bible, sid)
             state.character_bible = bible_dict  # type: ignore[assignment]
-            await emit("building_character_bible", 40, message="Loaded character bible from previous run")
+            await emit(
+                "building_character_bible", 40, message="Loaded character bible from previous run"
+            )
             log.info("Resume: loaded stages 1-4 from GCS for session %s", sid)
         except Exception as exc:
             log.warning("Resume: could not load GCS artifacts (%s) — re-running stages 1-4", exc)
@@ -436,171 +474,210 @@ async def _run_pipeline(
 
     if not resume:
         # ── 1. Fetch source text ──────────────────────────────────────────────
-        await emit("fetching", 5)
-        if cfg.source.gutenberg_url:
-            state.source_text = await asyncio.to_thread(fetch_gutenberg_url, cfg.source.gutenberg_url)
-        else:
-            candidates = [
-                cfg.source.title,
-                cfg.source.author,
-                cfg.source.title.split()[0] if cfg.source.title else None,
-            ]
-            results = []
-            for q in filter(None, candidates):
-                results = await asyncio.to_thread(search_gutenberg, q)
-                if results:
-                    break
-            if not results:
-                raise RuntimeError(
-                    f"No Gutenberg results found for: {cfg.source.title!r} / {cfg.source.author!r}"
+        with trace_stage("stage.fetch_literature", session_id=sid):
+            await emit("fetching", 5)
+            if cfg.source.gutenberg_url:
+                state.source_text = await asyncio.to_thread(
+                    fetch_gutenberg_url, cfg.source.gutenberg_url
                 )
-            state.source_text = await asyncio.to_thread(fetch_gutenberg_url, results[0]["download_url"])
-        gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
-        await emit("fetching", 10, message="Source text fetched")
+            else:
+                candidates = [
+                    cfg.source.title,
+                    cfg.source.author,
+                    cfg.source.title.split()[0] if cfg.source.title else None,
+                ]
+                results = []
+                for q in filter(None, candidates):
+                    results = await asyncio.to_thread(search_gutenberg, q)
+                    if results:
+                        break
+                if not results:
+                    raise RuntimeError(
+                        f"No Gutenberg results found for: "
+                        f"{cfg.source.title!r} / {cfg.source.author!r}"
+                    )
+                state.source_text = await asyncio.to_thread(
+                    fetch_gutenberg_url, results[0]["download_url"]
+                )
+            gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+            await emit("fetching", 10, message="Source text fetched")
 
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
-        await emit("adapting_text", 15)
-        chunks = _chunk_source_text(state.source_text, spread_count, spreads_meta)
-        n_chunks = len(chunks)
-        if n_chunks > 1:
-            log.info("Source text is large (%d words) — adapting in %d chunks",
-                     len(state.source_text.split()), n_chunks)
+        with trace_stage("stage.story_adapter", session_id=sid):
+            await emit("adapting_text", 15)
+            chunks = _chunk_source_text(state.source_text, spread_count, spreads_meta)
+            n_chunks = len(chunks)
+            if n_chunks > 1:
+                log.info("Source text is large (%d words) — adapting in %d chunks",
+                         len(state.source_text.split()), n_chunks)
 
-        text_sem = asyncio.Semaphore(settings.llm_concurrency)
+            text_sem = asyncio.Semaphore(settings.llm_concurrency)
 
-        if settings.text_two_pass:
-            # ── 2a. Parallel: per-chunk draft + per-chunk bible seed ──────
-            await emit("adapting_text", 18, message="Drafting and seeding bible per chunk")
-            draft_tasks = [
-                _draft_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
-                for i in range(n_chunks)
-            ]
-            seed_tasks = [
-                _seed_bible_for_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
-                for i in range(n_chunks)
-            ]
-            results = await asyncio.gather(*draft_tasks, *seed_tasks)
-            draft_texts: list[str] = list(results[:n_chunks])
-            seeds: list[dict] = list(results[n_chunks:])
+            if settings.text_two_pass:
+                # ── 2a. Parallel: per-chunk draft + per-chunk bible seed ──────
+                await emit("adapting_text", 18, message="Drafting and seeding bible per chunk")
+                draft_tasks = [
+                    _draft_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
+                    for i in range(n_chunks)
+                ]
+                seed_tasks = [
+                    _seed_bible_for_chunk(chunks[i], i, n_chunks, sid, cfg, text_sem)
+                    for i in range(n_chunks)
+                ]
+                results = await asyncio.gather(*draft_tasks, *seed_tasks)
+                draft_texts: list[str] = list(results[:n_chunks])
+                seeds: list[dict] = list(results[n_chunks:])
 
-            state.draft_text = "\n\n---chunk---\n\n".join(draft_texts)
-            gcs.write_text(sid, "adapted", "draft.txt", content=state.draft_text)
+                state.draft_text = "\n\n---chunk---\n\n".join(draft_texts)
+                gcs.write_text(sid, "adapted", "draft.txt", content=state.draft_text)
 
-            # ── 2b. Merge per-chunk bible seeds into one canonical bible ──
-            await emit("building_character_bible", 22, message="Merging bibles across chunks")
-            bible_dict = await _merge_bibles(seeds, sid, text_sem)
-            gcs.write_json(sid, "character_bible.json", data=bible_dict)
-            state.character_bible = bible_dict  # type: ignore[assignment]
+                # ── 2b. Merge per-chunk bible seeds into one canonical bible ──
+                await emit("building_character_bible", 22, message="Merging bibles across chunks")
+                bible_dict = await _merge_bibles(seeds, sid, text_sem)
+                gcs.write_json(sid, "character_bible.json", data=bible_dict)
+                state.character_bible = bible_dict  # type: ignore[assignment]
 
-            # ── 2c. Parallel: per-chunk craft loop (craft_adapter ↔ validator)
-            await emit("adapting_text", 25, message="Craft pass per chunk")
-            craft_tasks = [
-                _craft_chunk(
-                    chunks[i], i, n_chunks, sid, cfg,
-                    draft_text=draft_texts[i],
-                    bible_dict=bible_dict,
-                    sem=text_sem,
-                )
-                for i in range(n_chunks)
-            ]
-            chunk_spread_lists = await asyncio.gather(*craft_tasks)
-            all_spread_contents: list[SpreadContent] = []
-            for spreads in chunk_spread_lists:
-                all_spread_contents.extend(spreads)
-        else:
-            # Legacy single-pass adaptation (text_two_pass=False)
-            all_spread_contents = []
-            for chunk_idx, chunk in enumerate(chunks):
-                loop_runner = _make_runner(_text_loop)
-                chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
-                adapter_config = {
-                    **cfg.model_dump(),
-                    "spread_count": chunk["spread_count"],
-                    "spreads_meta": chunk["spreads_meta"],
-                }
-                if chunk["chunk_context"]:
-                    adapter_config["chunk_context"] = chunk["chunk_context"]
-                chunk_result = await _run_agent(
-                    loop_runner,
-                    chunk_sid,
-                    json.dumps({
-                        "source_text": chunk["text"],
-                        "config": adapter_config,
-                    }),
-                    output_key="adapted_text",
-                )
-                chunk_raw = _strip_json_fence(chunk_result)
-                try:
-                    chunk_parsed = json.loads(chunk_raw)
-                    all_spread_contents.extend(
-                        SpreadContent(**s) for s in chunk_parsed["spreads"]
+                # ── 2c. Parallel: per-chunk craft loop (craft_adapter ↔ validator)
+                await emit("adapting_text", 25, message="Craft pass per chunk")
+                craft_tasks = [
+                    _craft_chunk(
+                        chunks[i], i, n_chunks, sid, cfg,
+                        draft_text=draft_texts[i],
+                        bible_dict=bible_dict,
+                        sem=text_sem,
                     )
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Story adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
-                        f"\n\nRaw output:\n{chunk_result[:500]}"
+                    for i in range(n_chunks)
+                ]
+                chunk_spread_lists = await asyncio.gather(*craft_tasks)
+                all_spread_contents: list[SpreadContent] = []
+                for spreads in chunk_spread_lists:
+                    all_spread_contents.extend(spreads)
+            else:
+                # Legacy single-pass adaptation (text_two_pass=False)
+                all_spread_contents = []
+                for chunk_idx, chunk in enumerate(chunks):
+                    loop_runner = _make_runner(_text_loop)
+                    chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
+                    adapter_config = {
+                        **cfg.model_dump(),
+                        "spread_count": chunk["spread_count"],
+                        "spreads_meta": chunk["spreads_meta"],
+                    }
+                    if chunk["chunk_context"]:
+                        adapter_config["chunk_context"] = chunk["chunk_context"]
+                    chunk_result = await _run_agent(
+                        loop_runner,
+                        chunk_sid,
+                        json.dumps({
+                            "source_text": chunk["text"],
+                            "config": adapter_config,
+                        }),
+                        output_key="adapted_text",
                     )
-            bible_dict = {}
+                    chunk_raw = _strip_json_fence(chunk_result)
+                    try:
+                        chunk_parsed = json.loads(chunk_raw)
+                        all_spread_contents.extend(
+                            SpreadContent(**s) for s in chunk_parsed["spreads"]
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Story adapter chunk {chunk_idx + 1} returned invalid JSON: {exc}"
+                            f"\n\nRaw output:\n{chunk_result[:500]}"
+                        )
+                bible_dict = {}
 
-        state.spread_contents = all_spread_contents
-        if len(state.spread_contents) != spread_count:
-            raise RuntimeError(
-                f"Story adapter produced {len(state.spread_contents)} spreads "
-                f"but {spread_count} were requested."
+            state.spread_contents = all_spread_contents
+            if len(state.spread_contents) != spread_count:
+                raise RuntimeError(
+                    f"Story adapter produced {len(state.spread_contents)} spreads "
+                    f"but {spread_count} were requested."
+                )
+            state.adapted_text = json.dumps(
+                {"spreads": [sc.model_dump() for sc in state.spread_contents]}
             )
-        state.adapted_text = json.dumps({"spreads": [sc.model_dump() for sc in state.spread_contents]})
-        gcs.write_json(sid, "adapted", "story.json", data={
-            "title": cfg.source.title or "Untitled",
-            "author": cfg.source.author or "Unknown",
-            "target_age": cfg.target_age,
-            "adapted_text": state.adapted_text,
-        })
-        for sc in state.spread_contents:
-            gcs.write_json(sid, "spreads", f"spread_{sc.spread_number:02d}.json", data=sc.model_dump())
+            gcs.write_json(sid, "adapted", "story.json", data={
+                "title": cfg.source.title or "Untitled",
+                "author": cfg.source.author or "Unknown",
+                "target_age": cfg.target_age,
+                "adapted_text": state.adapted_text,
+            })
+            for sc in state.spread_contents:
+                gcs.write_json(
+                    sid, "spreads", f"spread_{sc.spread_number:02d}.json", data=sc.model_dump()
+                )
 
-        cover_html = render_cover_html(
-            title=cfg.source.title or "A Children's Storybook",
-            author=cfg.source.author or "Unknown",
-        )
-        gcs.write_text(sid, "pages", "cover.html", content=cover_html)
-        await emit("adapting_text", 35, message=f"Story adapted into {spread_count} spreads")
+            cover_html = render_cover_html(
+                title=cfg.source.title or "A Children's Storybook",
+                author=cfg.source.author or "Unknown",
+            )
+            gcs.write_text(sid, "pages", "cover.html", content=cover_html)
+            await emit("adapting_text", 35, message=f"Story adapted into {spread_count} spreads")
 
         # ── 3+4. Bible finalize (two-pass) or seed (single-pass) + planner ────
         await emit("building_character_bible", 36)
 
         async def _run_bible() -> dict:
-            if settings.text_two_pass:
-                # Refresh roster against final adapted text; voice_fingerprint stays
-                # frozen from the merge.
-                return await _finalize_bible(
-                    bible_dict, state.spread_contents, sid, text_sem,
+            with trace_stage("stage.character_bible", session_id=sid):
+                if settings.text_two_pass:
+                    # Refresh roster against final adapted text; voice_fingerprint stays
+                    # frozen from the merge.
+                    return await _finalize_bible(
+                        bible_dict, state.spread_contents, sid, text_sem,
+                    )
+                # Legacy single-pass: seed a bible from the final adapted text.
+                all_text_parts = []
+                for sc in state.spread_contents:
+                    if sc.verso_text:
+                        all_text_parts.append(sc.verso_text)
+                    if sc.recto_text:
+                        all_text_parts.append(sc.recto_text)
+                runner = _make_runner(character_bible_agent)
+                result = await _run_agent(
+                    runner, sid,
+                    json.dumps({
+                        "source_text": "\n\n".join(all_text_parts),
+                        "config": {
+                            "image_spec": cfg.image_spec,
+                            "target_age": cfg.target_age,
+                            "text_spec": cfg.text_spec,
+                        },
+                    }),
+                    output_key="bible_seed_json",
                 )
-            # Legacy single-pass: seed a bible from the final adapted text.
-            all_text_parts = []
-            for sc in state.spread_contents:
-                if sc.verso_text:
-                    all_text_parts.append(sc.verso_text)
-                if sc.recto_text:
-                    all_text_parts.append(sc.recto_text)
-            runner = _make_runner(character_bible_agent)
-            result = await _run_agent(
-                runner, sid,
-                json.dumps({
-                    "source_text": "\n\n".join(all_text_parts),
-                    "config": {
-                        "image_spec": cfg.image_spec,
-                        "target_age": cfg.target_age,
-                        "text_spec": cfg.text_spec,
-                    },
-                }),
-                output_key="bible_seed_json",
-            )
-            return json.loads(_strip_json_fence(result))
+                return json.loads(_strip_json_fence(result))
 
         async def _run_planner() -> dict:
-            runner = _make_runner(spread_planner)
-            result = await _run_agent(
-                runner, f"{sid}-planner",
+            with trace_stage("stage.spread_planner", session_id=sid):
+                runner = _make_runner(spread_planner)
+                result = await _run_agent(
+                    runner, f"{sid}-planner",
+                    json.dumps({
+                        "spreads": [sc.model_dump() for sc in state.spread_contents],
+                        "config": {
+                            "image_spec": cfg.image_spec or "",
+                            "custom_instructions": cfg.custom_instructions or "",
+                            "text_spec": cfg.text_spec or "",
+                        },
+                    }),
+                )
+                return json.loads(
+                    result.strip().removeprefix("```json").removesuffix("```").strip()
+                )
+
+        bible_dict, planner_output = await asyncio.gather(_run_bible(), _run_planner())
+        gcs.write_json(sid, "character_bible.json", data=bible_dict)
+        state.character_bible = bible_dict  # type: ignore[assignment]
+        await emit("planning_spreads", 43, message="Character bible and spread plan ready")
+
+    else:
+        # ── 4 (resume). Spread planner only — bible already loaded from GCS ────
+        with trace_stage("stage.spread_planner", session_id=sid):
+            await emit("planning_spreads", 41)
+            planner_runner = _make_runner(spread_planner)
+            planner_json_str = await _run_agent(
+                planner_runner,
+                f"{sid}-planner",
                 json.dumps({
                     "spreads": [sc.model_dump() for sc in state.spread_contents],
                     "config": {
@@ -610,32 +687,9 @@ async def _run_pipeline(
                     },
                 }),
             )
-            return json.loads(result.strip().removeprefix("```json").removesuffix("```").strip())
-
-        bible_dict, planner_output = await asyncio.gather(_run_bible(), _run_planner())
-        gcs.write_json(sid, "character_bible.json", data=bible_dict)
-        state.character_bible = bible_dict  # type: ignore[assignment]
-        await emit("planning_spreads", 43, message="Character bible and spread plan ready")
-
-    else:
-        # ── 4 (resume). Spread planner only — bible already loaded from GCS ────
-        await emit("planning_spreads", 41)
-        planner_runner = _make_runner(spread_planner)
-        planner_json_str = await _run_agent(
-            planner_runner,
-            f"{sid}-planner",
-            json.dumps({
-                "spreads": [sc.model_dump() for sc in state.spread_contents],
-                "config": {
-                    "image_spec": cfg.image_spec or "",
-                    "custom_instructions": cfg.custom_instructions or "",
-                    "text_spec": cfg.text_spec or "",
-                },
-            }),
-        )
-        planner_output = json.loads(
-            planner_json_str.strip().removeprefix("```json").removesuffix("```").strip()
-        )
+            planner_output = json.loads(
+                planner_json_str.strip().removeprefix("```json").removesuffix("```").strip()
+            )
 
     layout_spec = {
         "font_family": planner_output.get("font_family", "Georgia, serif"),
@@ -663,281 +717,298 @@ async def _run_pipeline(
 
     # ── 5. Generate images per spread (parallel) ──────────────────────────────
     total_spreads = len(state.spread_contents)
-    image_sem = asyncio.Semaphore(settings.image_concurrency)
-    llm_sem = asyncio.Semaphore(settings.llm_concurrency)
-    ref_ready: asyncio.Event = asyncio.Event()
-    ref_image: list[bytes] = []
+    with trace_stage("stage.generate_illustrations", session_id=sid, total_spreads=total_spreads):
+        image_sem = asyncio.Semaphore(settings.image_concurrency)
+        llm_sem = asyncio.Semaphore(settings.llm_concurrency)
+        ref_ready: asyncio.Event = asyncio.Event()
+        ref_image: list[bytes] = []
 
-    # Find coordinates (spread_number, image_index) of the first planned illustration in the book.
-    # Spread 0 may be purely typographic, so the first illustration could be on spread 1+.
-    first_image_coord: tuple[int, int] | None = None
-    for sc in sorted(state.spread_contents, key=lambda c: c.spread_number):
-        plan = plan_by_spread.get(sc.spread_number)
-        if plan and plan.illustration_plan:
-            first_image_coord = (sc.spread_number, plan.illustration_plan[0].image_index)
-            break
-
-    if first_image_coord is None:
-        ref_ready.set()
-
-    # Per-spread fractional completion (0.0 - 1.0). Substages bump this so the
-    # progress bar moves through prompt → image → render+verify instead of
-    # jumping when a whole spread completes.
-    spread_frac: dict[int, float] = {}
-    # Maps spread_number -> first image bytes for continuity checking
-    completed_spread_images: dict[int, bytes] = {}
-
-    def _spread_band_pct() -> int:
-        total = sum(spread_frac.values())
-        return 43 + int(total / max(1, total_spreads) * 48)
-
-    async def _bump(s: int, by: float, message: str = "") -> None:
-        spread_frac[s] = min(1.0, spread_frac.get(s, 0.0) + by)
-        await emit(
-            "generating_image", _spread_band_pct(),
-            spread=s, of=total_spreads, message=message,
-        )
-
-    async def _render_and_verify_spread(
-        spread_number: int,
-        spread_content: SpreadContent,
-        illustration_plan: list[IllustrationEntry],
-        image_bytes_by_index: dict[int, bytes],
-    ) -> str:
-        plan = plan_by_spread.get(spread_number, SpreadPlan(spread_number=spread_number))
-        base_treatment = plan.text_treatment
-        base_position = plan.text_position
-        verifier_runner = _make_runner(html_page_verifier)
-        spread_html = ""
-        accumulated_overrides: dict = {}
-        # Pass the first image to verifier so it can judge actual legibility
-        primary_img_bytes = image_bytes_by_index.get(0) or image_bytes_by_index.get(1)
-        secondary_img_bytes = image_bytes_by_index.get(1) if 0 in image_bytes_by_index else None
-
-        for verify_attempt in range(1, 3):
-            applied_treatment = accumulated_overrides.get("text_treatment", base_treatment)
-            spread_html = render_spread_html(
-                spread_number=spread_number,
-                verso_text=spread_content.verso_text,
-                recto_text=spread_content.recto_text,
-                illustration_plan=[e.model_dump() for e in illustration_plan],
-                image_bytes_by_index=image_bytes_by_index,
-                layout_spec=layout_spec,
-                target_age=cfg.target_age,
-                css_overrides=accumulated_overrides if accumulated_overrides else None,
-                text_treatment=applied_treatment,
-                text_position=base_position,
-            )
-            html_for_verify = re.sub(
-                r'src="data:image/[^;]+;base64,[^"]*"',
-                'src="[image-omitted]"',
-                spread_html,
-            )
-            verify_input = json.dumps({
-                "html_code": html_for_verify,
-                "illustration_plan": [e.model_dump() for e in illustration_plan],
-                "verso_text": spread_content.verso_text,
-                "recto_text": spread_content.recto_text,
-                "spread_number": spread_number,
-            })
-            async with llm_sem:
-                verify_result = await _run_agent(
-                    verifier_runner,
-                    f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
-                    verify_input,
-                    subject_image=primary_img_bytes,
-                    reference_image=secondary_img_bytes,
-                )
-            if "approved" in verify_result.lower():
+        # Find coordinates (spread_number, image_index) of the first planned
+        # illustration in the book.
+        # Spread 0 may be purely typographic, so the first illustration could be on spread 1+.
+        first_image_coord: tuple[int, int] | None = None
+        for sc in sorted(state.spread_contents, key=lambda c: c.spread_number):
+            plan = plan_by_spread.get(sc.spread_number)
+            if plan and plan.illustration_plan:
+                first_image_coord = (sc.spread_number, plan.illustration_plan[0].image_index)
                 break
-            log.warning(
-                "Spread HTML layout verification failed for spread %d (attempt %d): %s",
-                spread_number, verify_attempt, verify_result[:200],
+
+        if first_image_coord is None:
+            ref_ready.set()
+
+        # Per-spread fractional completion (0.0 - 1.0). Substages bump this so the
+        # progress bar moves through prompt → image → render+verify instead of
+        # jumping when a whole spread completes.
+        spread_frac: dict[int, float] = {}
+        # Maps spread_number -> first image bytes for continuity checking
+        completed_spread_images: dict[int, bytes] = {}
+
+        def _spread_band_pct() -> int:
+            total = sum(spread_frac.values())
+            return 43 + int(total / max(1, total_spreads) * 48)
+
+        async def _bump(s: int, by: float, message: str = "") -> None:
+            spread_frac[s] = min(1.0, spread_frac.get(s, 0.0) + by)
+            await emit(
+                "generating_image", _spread_band_pct(),
+                spread=s, of=total_spreads, message=message,
             )
-            vsession = await verifier_runner.session_service.get_session(
-                app_name=verifier_runner.app_name,
-                user_id="pipeline",
-                session_id=f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
-            )
-            if vsession:
-                new_overrides = vsession.state.get("layout_css_overrides") or {}
-                if isinstance(new_overrides, dict):
-                    accumulated_overrides.update(new_overrides)
-                    log.info(
-                        "Spread %d verifier feedback: %s → applying overrides: %s",
-                        spread_number,
-                        vsession.state.get("layout_feedback", "")[:120],
-                        accumulated_overrides,
-                    )
-        return spread_html
 
-    async def _process_spread(spread_content: SpreadContent) -> tuple[int, dict[int, bytes]]:
-        s = spread_content.spread_number
-        plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
-        illustration_plan = plan.illustration_plan
-        n_entries = max(1, len(illustration_plan))
-        # Per-entry substage weights, summing to 0.55 across all entries; the
-        # remaining 0.45 covers render+verify.
-        prompt_w = 0.10 / n_entries
-        image_w = 0.45 / n_entries
-        render_w = 0.45
+        async def _render_and_verify_spread(
+            spread_number: int,
+            spread_content: SpreadContent,
+            illustration_plan: list[IllustrationEntry],
+            image_bytes_by_index: dict[int, bytes],
+        ) -> str:
+            plan = plan_by_spread.get(spread_number, SpreadPlan(spread_number=spread_number))
+            base_treatment = plan.text_treatment
+            base_position = plan.text_position
+            verifier_runner = _make_runner(html_page_verifier)
+            spread_html = ""
+            accumulated_overrides: dict = {}
+            # Pass the first image to verifier so it can judge actual legibility
+            primary_img_bytes = image_bytes_by_index.get(0) or image_bytes_by_index.get(1)
+            secondary_img_bytes = image_bytes_by_index.get(1) if 0 in image_bytes_by_index else None
 
-        image_bytes_by_index: dict[int, bytes] = {}
-
-        await emit(
-            "generating_image", _spread_band_pct(),
-            spread=s, of=total_spreads, message="start",
-        )
-
-        is_ref_spread = first_image_coord is not None and s == first_image_coord[0]
-        try:
-            for entry in illustration_plan:
-                img_idx = entry.image_index
-
-                if resume and await asyncio.to_thread(gcs.spread_image_exists, sid, s, img_idx):
-                    img_bytes = await asyncio.to_thread(gcs.load_spread_image_bytes, sid, s, img_idx)
-                    image_bytes_by_index[img_idx] = img_bytes
-                    if not ref_image:
-                        ref_image.append(img_bytes)
-                        ref_ready.set()
-                    log.info("Resume: loaded existing image for spread %d img %d", s, img_idx)
-                    await _bump(s, prompt_w + image_w, "cached")
-                    continue
-
-                is_first = (first_image_coord is not None and (s, img_idx) == first_image_coord)
-                prompt_input = json.dumps({
+            for verify_attempt in range(1, 3):
+                applied_treatment = accumulated_overrides.get("text_treatment", base_treatment)
+                spread_html = render_spread_html(
+                    spread_number=spread_number,
+                    verso_text=spread_content.verso_text,
+                    recto_text=spread_content.recto_text,
+                    illustration_plan=[e.model_dump() for e in illustration_plan],
+                    image_bytes_by_index=image_bytes_by_index,
+                    layout_spec=layout_spec,
+                    target_age=cfg.target_age,
+                    css_overrides=accumulated_overrides if accumulated_overrides else None,
+                    text_treatment=applied_treatment,
+                    text_position=base_position,
+                )
+                html_for_verify = re.sub(
+                    r'src="data:image/[^;]+;base64,[^"]*"',
+                    'src="[image-omitted]"',
+                    spread_html,
+                )
+                verify_input = json.dumps({
+                    "html_code": html_for_verify,
+                    "illustration_plan": [e.model_dump() for e in illustration_plan],
                     "verso_text": spread_content.verso_text,
                     "recto_text": spread_content.recto_text,
-                    "verso_instructions": spread_content.verso_instructions,
-                    "recto_instructions": spread_content.recto_instructions,
-                    "spread_number": s,
-                    "total_spreads": total_spreads,
-                    "character_bible": bible_dict,
-                    "config": {"image_spec": cfg.image_spec},
-                    "coverage": entry.coverage,
-                    "aspect_ratio": entry.aspect_ratio,
-                    "illustration_notes": entry.illustration_notes,
-                    "is_first_spread": is_first,
+                    "spread_number": spread_number,
                 })
-
-                prompt_runner = _make_runner(illustration_prompter)
                 async with llm_sem:
-                    image_prompt = await _run_agent(
-                        prompt_runner, f"{sid}-prompt-{s}-{img_idx}", prompt_input,
-                        output_key="image_prompt",
+                    verify_result = await _run_agent(
+                        verifier_runner,
+                        f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
+                        verify_input,
+                        subject_image=primary_img_bytes,
+                        reference_image=secondary_img_bytes,
                     )
+                if "approved" in verify_result.lower():
+                    break
+                log.warning(
+                    "Spread HTML layout verification failed for spread %d (attempt %d): %s",
+                    spread_number, verify_attempt, verify_result[:200],
+                )
+                vsession = await verifier_runner.session_service.get_session(
+                    app_name=verifier_runner.app_name,
+                    user_id="pipeline",
+                    session_id=f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
+                )
+                if vsession:
+                    new_overrides = vsession.state.get("layout_css_overrides") or {}
+                    if isinstance(new_overrides, dict):
+                        accumulated_overrides.update(new_overrides)
+                        log.info(
+                            "Spread %d verifier feedback: %s → applying overrides: %s",
+                            spread_number,
+                            vsession.state.get("layout_feedback", "")[:120],
+                            accumulated_overrides,
+                        )
+            return spread_html
+
+        async def _process_spread(spread_content: SpreadContent) -> tuple[int, dict[int, bytes]]:
+            s = spread_content.spread_number
+            with get_tracer().start_as_current_span(
+                f"spread.process_{s}", attributes={"spread.number": s}
+            ):
+                plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
+                illustration_plan = plan.illustration_plan
+                n_entries = max(1, len(illustration_plan))
+                # Per-entry substage weights, summing to 0.55 across all entries; the
+                # remaining 0.45 covers render+verify.
+                prompt_w = 0.10 / n_entries
+                image_w = 0.45 / n_entries
+                render_w = 0.45
+
+                image_bytes_by_index: dict[int, bytes] = {}
+
+                await emit(
+                    "generating_image", _spread_band_pct(),
+                    spread=s, of=total_spreads, message="start",
+                )
+
+                is_ref_spread = first_image_coord is not None and s == first_image_coord[0]
+                try:
+                    for entry in illustration_plan:
+                        img_idx = entry.image_index
+
+                        if resume and await asyncio.to_thread(
+                            gcs.spread_image_exists, sid, s, img_idx
+                        ):
+                            img_bytes = await asyncio.to_thread(
+                                gcs.load_spread_image_bytes, sid, s, img_idx
+                            )
+                            image_bytes_by_index[img_idx] = img_bytes
+                            if not ref_image:
+                                ref_image.append(img_bytes)
+                                ref_ready.set()
+                            log.info(
+                                "Resume: loaded existing image for spread %d img %d", s, img_idx
+                            )
+                            await _bump(s, prompt_w + image_w, "cached")
+                            continue
+
+                        is_first = (
+                            first_image_coord is not None and (s, img_idx) == first_image_coord
+                        )
+                        prompt_input = json.dumps({
+                            "verso_text": spread_content.verso_text,
+                            "recto_text": spread_content.recto_text,
+                            "verso_instructions": spread_content.verso_instructions,
+                            "recto_instructions": spread_content.recto_instructions,
+                            "spread_number": s,
+                            "total_spreads": total_spreads,
+                            "character_bible": bible_dict,
+                            "config": {"image_spec": cfg.image_spec},
+                            "coverage": entry.coverage,
+                            "aspect_ratio": entry.aspect_ratio,
+                            "illustration_notes": entry.illustration_notes,
+                            "is_first_spread": is_first,
+                        })
+
+                        prompt_runner = _make_runner(illustration_prompter)
+                        async with llm_sem:
+                            image_prompt = await _run_agent(
+                                prompt_runner, f"{sid}-prompt-{s}-{img_idx}", prompt_input,
+                                output_key="image_prompt",
+                            )
+                        await asyncio.to_thread(
+                            gcs.write_text,
+                            sid,
+                            "prompts",
+                            f"spread_{s:02d}_img{img_idx}_prompt.txt",
+                            content=image_prompt,
+                        )
+                        await _bump(s, prompt_w, "prompt ready")
+
+                        img_bytes = await _generate_with_retries(
+                            session_id=sid,
+                            spread_number=s,
+                            image_index=img_idx,
+                            image_prompt=image_prompt,
+                            spread_content=spread_content,
+                            illustration_entry=entry,
+                            bible_dict=bible_dict,
+                            image_sem=image_sem,
+                            llm_sem=llm_sem,
+                            ref_ready=ref_ready,
+                            ref_image=ref_image,
+                            progress_queue=progress_queue,
+                            completed_spread_images=completed_spread_images,
+                            is_ref_image=is_first,
+                        )
+
+                        await asyncio.to_thread(
+                            gcs.write_bytes, sid, "images", f"spread_{s:02d}_img{img_idx}.png",
+                            data=img_bytes, content_type="image/png",
+                        )
+                        image_bytes_by_index[img_idx] = img_bytes
+                        await _bump(s, image_w, "image ready")
+
+                        if not ref_image:
+                            ref_image.append(img_bytes)
+                            ref_ready.set()
+                finally:
+                    if is_ref_spread and not ref_ready.is_set():
+                        ref_ready.set()
+
+                completed_spread_images[s] = image_bytes_by_index.get(0, b"")
+
+                spread_html = await _render_and_verify_spread(
+                    s, spread_content, illustration_plan, image_bytes_by_index
+                )
                 await asyncio.to_thread(
-                    gcs.write_text, sid, "prompts", f"spread_{s:02d}_img{img_idx}_prompt.txt",
-                    content=image_prompt,
+                    gcs.write_text, sid, "spreads", f"spread_{s:02d}.html", content=spread_html
                 )
-                await _bump(s, prompt_w, "prompt ready")
+                await _bump(s, render_w, "done")
 
-                img_bytes = await _generate_with_retries(
-                    session_id=sid,
-                    spread_number=s,
-                    image_index=img_idx,
-                    image_prompt=image_prompt,
-                    spread_content=spread_content,
-                    illustration_entry=entry,
-                    bible_dict=bible_dict,
-                    image_sem=image_sem,
-                    llm_sem=llm_sem,
-                    ref_ready=ref_ready,
-                    ref_image=ref_image,
-                    progress_queue=progress_queue,
-                    completed_spread_images=completed_spread_images,
-                    is_ref_image=is_first,
-                )
+                return s, image_bytes_by_index
 
-                await asyncio.to_thread(
-                    gcs.write_bytes, sid, "images", f"spread_{s:02d}_img{img_idx}.png",
-                    data=img_bytes, content_type="image/png",
-                )
-                image_bytes_by_index[img_idx] = img_bytes
-                await _bump(s, image_w, "image ready")
+        tasks = [_process_spread(sc) for sc in state.spread_contents]
+        results: dict[int, dict[int, bytes]] = {s: imgs for s, imgs in await asyncio.gather(*tasks)}
 
-                if not ref_image:
-                    ref_image.append(img_bytes)
-                    ref_ready.set()
-        finally:
-            if is_ref_spread and not ref_ready.is_set():
-                ref_ready.set()
-
-        completed_spread_images[s] = image_bytes_by_index.get(0, b"")
-
-        spread_html = await _render_and_verify_spread(
-            s, spread_content, illustration_plan, image_bytes_by_index
-        )
-        await asyncio.to_thread(
-            gcs.write_text, sid, "spreads", f"spread_{s:02d}.html", content=spread_html
-        )
-        await _bump(s, render_w, "done")
-
-        return s, image_bytes_by_index
-
-    tasks = [_process_spread(sc) for sc in state.spread_contents]
-    results: dict[int, dict[int, bytes]] = {s: imgs for s, imgs in await asyncio.gather(*tasks)}
-
-    state.html_gcs_uris = [
-        f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/spreads/spread_{s:02d}.html"
-        for s in range(total_spreads)
-    ]
-    state.image_gcs_uris = [
-        f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/images/spread_{s:02d}_img0.png"
-        for s in range(total_spreads)
-        if results.get(s)
-    ]
+        state.html_gcs_uris = [
+            f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/spreads/spread_{s:02d}.html"
+            for s in range(total_spreads)
+        ]
+        state.image_gcs_uris = [
+            f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/images/spread_{s:02d}_img0.png"
+            for s in range(total_spreads)
+            if results.get(s)
+        ]
 
     # ── 6. Compose PDFs ───────────────────────────────────────────────────────
-    await emit("composing_pdf", 92)
+    with trace_stage("stage.composite_pdf", session_id=sid):
+        await emit("composing_pdf", 92)
 
-    spread_contexts = []
-    for sc in state.spread_contents:
-        s = sc.spread_number
-        plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
-        font_size = _FONT_SIZES.get(cfg.target_age, 16)
-        ctx = _build_spread_context(
-            spread_number=s,
-            verso_text=sc.verso_text,
-            recto_text=sc.recto_text,
-            illustration_plan=[e.model_dump() for e in plan.illustration_plan],
-            image_bytes_by_index=results.get(s, {}),
+        spread_contexts = []
+        for sc in state.spread_contents:
+            s = sc.spread_number
+            plan = plan_by_spread.get(s, SpreadPlan(spread_number=s))
+            font_size = _FONT_SIZES.get(cfg.target_age, 16)
+            ctx = _build_spread_context(
+                spread_number=s,
+                verso_text=sc.verso_text,
+                recto_text=sc.recto_text,
+                illustration_plan=[e.model_dump() for e in plan.illustration_plan],
+                image_bytes_by_index=results.get(s, {}),
+                layout_spec=layout_spec,
+                font_size=font_size,
+                text_treatment=plan.text_treatment,
+                text_position=plan.text_position,
+            )
+            spread_contexts.append(ctx)
+
+        title = cfg.source.title or "A Children's Storybook"
+        author = cfg.source.author or "Unknown"
+
+        wide_pdf = compose_spread_pdf_wide(
+            title=title,
+            author=author,
+            spread_contexts=spread_contexts,
             layout_spec=layout_spec,
-            font_size=font_size,
-            text_treatment=plan.text_treatment,
-            text_position=plan.text_position,
+            target_age=cfg.target_age,
         )
-        spread_contexts.append(ctx)
+        state.wide_pdf_gcs_uri = gcs.write_bytes(
+            sid, "final", "storybook_wide.pdf", data=wide_pdf, content_type="application/pdf"
+        )
 
-    title = cfg.source.title or "A Children's Storybook"
-    author = cfg.source.author or "Unknown"
+        publishing_pdf = compose_spread_pdf_publishing(
+            title=title,
+            author=author,
+            spread_contexts=spread_contexts,
+            layout_spec=layout_spec,
+            target_age=cfg.target_age,
+        )
+        state.pdf_gcs_uri = gcs.write_bytes(
+            sid, "final", "storybook.pdf", data=publishing_pdf, content_type="application/pdf"
+        )
 
-    wide_pdf = compose_spread_pdf_wide(
-        title=title,
-        author=author,
-        spread_contexts=spread_contexts,
-        layout_spec=layout_spec,
-        target_age=cfg.target_age,
-    )
-    state.wide_pdf_gcs_uri = gcs.write_bytes(
-        sid, "final", "storybook_wide.pdf", data=wide_pdf, content_type="application/pdf"
-    )
-
-    publishing_pdf = compose_spread_pdf_publishing(
-        title=title,
-        author=author,
-        spread_contexts=spread_contexts,
-        layout_spec=layout_spec,
-        target_age=cfg.target_age,
-    )
-    state.pdf_gcs_uri = gcs.write_bytes(
-        sid, "final", "storybook.pdf", data=publishing_pdf, content_type="application/pdf"
-    )
-
-    await emit("done", 100, session_id=sid)
-    state.current_stage = "done"
-    state.progress_pct = 100
-    return state
+        await emit("done", 100, session_id=sid)
+        state.current_stage = "done"
+        state.progress_pct = 100
+        return state
 
 
 # ── Image generation helpers ──────────────────────────────────────────────────
@@ -949,7 +1020,8 @@ def _simplify_prompt(original_prompt: str, bible_dict: dict, attempt: int) -> st
         first_sentence = original_prompt.split(".")[0].strip()
         return (
             f"{first_sentence}. {style}. "
-            "Children's storybook illustration, age-appropriate, cheerful, no violence, no adult content."
+            "Children's storybook illustration, age-appropriate, cheerful, "
+            "no violence, no adult content."
         )
     return (
         f"A cheerful children's storybook illustration in the style of: {style}. "
@@ -960,6 +1032,7 @@ def _simplify_prompt(original_prompt: str, bible_dict: dict, attempt: int) -> st
 def _placeholder_image(label: str) -> bytes:
     """Generate a simple pastel placeholder PNG when all image attempts fail."""
     from io import BytesIO
+
     from PIL import Image, ImageDraw, ImageFont
 
     colors = ["#F4C2C2", "#C2D4F4", "#C2F4D4", "#F4E8C2", "#E8C2F4"]
@@ -1005,82 +1078,116 @@ async def _generate_with_retries(
     img_bytes: bytes | None = None
 
     for attempt in range(1, settings.image_max_retries + 2):
-        try:
-            async with image_sem:
-                img_bytes = await asyncio.to_thread(
-                    generate_image, current_prompt, illustration_entry.aspect_ratio
+        with trace_retry_attempt(
+            "image.generate_and_validate",
+            attempt=attempt,
+            max_attempts=settings.image_max_retries + 1,
+            spread_number=spread_number,
+            image_index=image_index,
+        ) as retry_span:
+            try:
+                async with image_sem:
+                    img_bytes = await asyncio.to_thread(
+                        generate_image, current_prompt, illustration_entry.aspect_ratio
+                    )
+            except (ImageContentPolicyError, ImageTokenLimitError) as exc:
+                is_policy = isinstance(exc, ImageContentPolicyError)
+                retry_span.set_attribute("retry.reason", str(exc))
+                log.warning(
+                    "%s on spread %d img %d attempt %d",
+                    "Content policy refusal" if is_policy else "Token limit hit",
+                    spread_number,
+                    image_index,
+                    attempt,
                 )
-        except (ImageContentPolicyError, ImageTokenLimitError) as exc:
-            is_policy = isinstance(exc, ImageContentPolicyError)
+                if attempt <= settings.image_max_retries:
+                    await progress_queue.put({
+                        "stage": "image_retry",
+                        "spread": spread_number,
+                        "attempt": attempt,
+                        "reason": str(exc),
+                    })
+                    if is_policy or attempt > 1:
+                        current_prompt = _simplify_prompt(current_prompt, bible_dict, attempt)
+                else:
+                    log.error(
+                        "All image attempts failed for spread %d img %d — using placeholder",
+                        spread_number,
+                        image_index,
+                    )
+                    return _placeholder_image(f"Spread {spread_number}")
+                continue
+
+            style_ref: bytes | None = None
+            if not is_ref_image:
+                await ref_ready.wait()
+                style_ref = ref_image[0] if ref_image else None
+
+            prev_img: bytes | None = completed_spread_images.get(spread_number - 1)
+
+            validate_input = json.dumps({
+                "image_prompt": current_prompt,
+                "verso_text": spread_content.verso_text,
+                "recto_text": spread_content.recto_text,
+                "verso_instructions": spread_content.verso_instructions,
+                "recto_instructions": spread_content.recto_instructions,
+                "illustration_notes": illustration_entry.illustration_notes,
+                "coverage": illustration_entry.coverage,
+                "character_bible": bible_dict,
+                "spread_number": spread_number,
+            })
+            with check_image_validation(
+                attempt=attempt,
+                max_attempts=settings.image_max_retries + 1,
+                spread_number=spread_number,
+                image_index=image_index,
+            ) as val_span:
+                async with llm_sem:
+                    result = await _run_agent(
+                        validator_runner,
+                        f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
+                        validate_input,
+                        subject_image=img_bytes,
+                        reference_image=style_ref,
+                        prev_spread_image=prev_img,
+                    )
+
+                passed = "approved" in result.lower()
+                score = 1.0 if passed else 0.0
+                reasons = [] if passed else [result.strip()]
+                record_validation_result(
+                    val_span,
+                    passed=passed,
+                    score=score,
+                    attempt=attempt,
+                    reasons=reasons,
+                )
+
+                if passed:
+                    return img_bytes
+
             log.warning(
-                "%s on spread %d img %d attempt %d",
-                "Content policy refusal" if is_policy else "Token limit hit",
-                spread_number, image_index, attempt,
+                "Image validation attempt %d failed for spread %d img %d",
+                attempt,
+                spread_number,
+                image_index,
             )
+
             if attempt <= settings.image_max_retries:
+                retry_span.set_attribute("retry.reason", result[:200])
                 await progress_queue.put({
                     "stage": "image_retry",
                     "spread": spread_number,
                     "attempt": attempt,
-                    "reason": str(exc),
+                    "reason": result[:200],
                 })
-                if is_policy or attempt > 1:
-                    current_prompt = _simplify_prompt(current_prompt, bible_dict, attempt)
-            else:
-                log.error(
-                    "All image attempts failed for spread %d img %d — using placeholder",
-                    spread_number, image_index,
+                session = await validator_runner.session_service.get_session(
+                    app_name=validator_runner.app_name,
+                    user_id="pipeline",
+                    session_id=f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
                 )
-                return _placeholder_image(f"Spread {spread_number}")
-            continue
-
-        style_ref: bytes | None = None
-        if not is_ref_image:
-            await ref_ready.wait()
-            style_ref = ref_image[0] if ref_image else None
-
-        prev_img: bytes | None = completed_spread_images.get(spread_number - 1)
-
-        validate_input = json.dumps({
-            "image_prompt": current_prompt,
-            "verso_text": spread_content.verso_text,
-            "recto_text": spread_content.recto_text,
-            "verso_instructions": spread_content.verso_instructions,
-            "recto_instructions": spread_content.recto_instructions,
-            "illustration_notes": illustration_entry.illustration_notes,
-            "coverage": illustration_entry.coverage,
-            "character_bible": bible_dict,
-            "spread_number": spread_number,
-        })
-        async with llm_sem:
-            result = await _run_agent(
-                validator_runner,
-                f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
-                validate_input,
-                subject_image=img_bytes,
-                reference_image=style_ref,
-                prev_spread_image=prev_img,
-            )
-
-        if "approved" in result.lower():
-            return img_bytes
-
-        log.warning("Image validation attempt %d failed for spread %d img %d", attempt, spread_number, image_index)
-
-        if attempt <= settings.image_max_retries:
-            await progress_queue.put({
-                "stage": "image_retry",
-                "spread": spread_number,
-                "attempt": attempt,
-                "reason": result[:200],
-            })
-            session = await validator_runner.session_service.get_session(
-                app_name=validator_runner.app_name,
-                user_id="pipeline",
-                session_id=f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
-            )
-            if session and session.state.get("revised_image_prompt"):
-                current_prompt = session.state["revised_image_prompt"]
+                if session and session.state.get("revised_image_prompt"):
+                    current_prompt = session.state["revised_image_prompt"]
 
     log.error(
         "Exhausted image retries for spread %d img %d — using last generated image",
