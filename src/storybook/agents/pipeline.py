@@ -70,6 +70,7 @@ from storybook.models import (
 from storybook.tools import gcs
 from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
 from storybook.tracing import (
+    SpanContextManager,
     get_tracer,
     make_trace_url,
     trace_agent_call,
@@ -476,7 +477,18 @@ async def _run_pipeline(
         # ── 1. Fetch source text ──────────────────────────────────────────────
         with trace_stage("stage.fetch_literature", session_id=sid):
             await emit("fetching", 5)
+            log.info(
+                "Starting stage.fetch_literature for session %s (title=%r, author=%r, url=%r)",
+                sid,
+                cfg.source.title,
+                cfg.source.author,
+                cfg.source.gutenberg_url,
+            )
             if cfg.source.gutenberg_url:
+                log.info(
+                    "Fetching literature via direct Gutenberg URL: %s",
+                    cfg.source.gutenberg_url,
+                )
                 state.source_text = await asyncio.to_thread(
                     fetch_gutenberg_url, cfg.source.gutenberg_url
                 )
@@ -488,7 +500,14 @@ async def _run_pipeline(
                 ]
                 results = []
                 for q in filter(None, candidates):
+                    log.info("Searching Gutenberg for query: %r", q)
                     results = await asyncio.to_thread(search_gutenberg, q)
+                    log.info(
+                        "Literature search returned %d candidate(s) for query %r: %s",
+                        len(results),
+                        q,
+                        [r.get("title") for r in results],
+                    )
                     if results:
                         break
                 if not results:
@@ -496,17 +515,51 @@ async def _run_pipeline(
                         f"No Gutenberg results found for: "
                         f"{cfg.source.title!r} / {cfg.source.author!r}"
                     )
+                log.info(
+                    "Downloading selected candidate: %r (%s)",
+                    results[0].get("title"),
+                    results[0]["download_url"],
+                )
                 state.source_text = await asyncio.to_thread(
                     fetch_gutenberg_url, results[0]["download_url"]
                 )
-            gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+
+            log.info(
+                "Literature fetch complete for session %s: downloaded %d chars (%d words)",
+                sid,
+                len(state.source_text),
+                len(state.source_text.split()),
+            )
+
+            with SpanContextManager(
+                "gcs.write_source_text",
+                attributes={
+                    "gcs.bucket": settings.gcs_artifacts_bucket,
+                    "gcs.path": f"sessions/{sid}/original/source_text.txt",
+                    "text.length_chars": len(state.source_text),
+                    "text.length_words": len(state.source_text.split()),
+                },
+            ):
+                gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+            log.info(
+                "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
+                settings.gcs_artifacts_bucket,
+                sid,
+            )
             await emit("fetching", 10, message="Source text fetched")
+            log.info("Completed stage.fetch_literature for session %s", sid)
 
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
         with trace_stage("stage.story_adapter", session_id=sid):
             await emit("adapting_text", 15)
             chunks = _chunk_source_text(state.source_text, spread_count, spreads_meta)
             n_chunks = len(chunks)
+            log.info(
+                "Starting stage.story_adapter for session %s (chunks=%d, model=%s)",
+                sid,
+                n_chunks,
+                settings.story_adapter_model,
+            )
             if n_chunks > 1:
                 log.info("Source text is large (%d words) — adapting in %d chunks",
                          len(state.source_text.split()), n_chunks)
@@ -606,6 +659,11 @@ async def _run_pipeline(
                 gcs.write_json(
                     sid, "spreads", f"spread_{sc.spread_number:02d}.json", data=sc.model_dump()
                 )
+            log.info(
+                "Completed stage.story_adapter for session %s (adapted %d spreads)",
+                sid,
+                len(state.spread_contents),
+            )
 
             cover_html = render_cover_html(
                 title=cfg.source.title or "A Children's Storybook",
@@ -619,36 +677,54 @@ async def _run_pipeline(
 
         async def _run_bible() -> dict:
             with trace_stage("stage.character_bible", session_id=sid):
+                log.info(
+                    "Starting stage.character_bible for session %s (model=%s)",
+                    sid,
+                    settings.character_bible_model,
+                )
                 if settings.text_two_pass:
                     # Refresh roster against final adapted text; voice_fingerprint stays
                     # frozen from the merge.
-                    return await _finalize_bible(
+                    bible_res = await _finalize_bible(
                         bible_dict, state.spread_contents, sid, text_sem,
                     )
-                # Legacy single-pass: seed a bible from the final adapted text.
-                all_text_parts = []
-                for sc in state.spread_contents:
-                    if sc.verso_text:
-                        all_text_parts.append(sc.verso_text)
-                    if sc.recto_text:
-                        all_text_parts.append(sc.recto_text)
-                runner = _make_runner(character_bible_agent)
-                result = await _run_agent(
-                    runner, sid,
-                    json.dumps({
-                        "source_text": "\n\n".join(all_text_parts),
-                        "config": {
-                            "image_spec": cfg.image_spec,
-                            "target_age": cfg.target_age,
-                            "text_spec": cfg.text_spec,
-                        },
-                    }),
-                    output_key="bible_seed_json",
+                else:
+                    # Legacy single-pass: seed a bible from the final adapted text.
+                    all_text_parts = []
+                    for sc in state.spread_contents:
+                        if sc.verso_text:
+                            all_text_parts.append(sc.verso_text)
+                        if sc.recto_text:
+                            all_text_parts.append(sc.recto_text)
+                    runner = _make_runner(character_bible_agent)
+                    result = await _run_agent(
+                        runner, sid,
+                        json.dumps({
+                            "source_text": "\n\n".join(all_text_parts),
+                            "config": {
+                                "image_spec": cfg.image_spec,
+                                "target_age": cfg.target_age,
+                                "text_spec": cfg.text_spec,
+                            },
+                        }),
+                        output_key="bible_seed_json",
+                    )
+                    bible_res = json.loads(_strip_json_fence(result))
+                log.info(
+                    "Completed stage.character_bible for session %s (found %d characters)",
+                    sid,
+                    len(bible_res.get("characters", {})),
                 )
-                return json.loads(_strip_json_fence(result))
+                return bible_res
 
         async def _run_planner() -> dict:
             with trace_stage("stage.spread_planner", session_id=sid):
+                log.info(
+                    "Starting stage.spread_planner for session %s (model=%s, spreads=%d)",
+                    sid,
+                    settings.spread_planner_model,
+                    len(state.spread_contents),
+                )
                 runner = _make_runner(spread_planner)
                 result = await _run_agent(
                     runner, f"{sid}-planner",
@@ -661,9 +737,15 @@ async def _run_pipeline(
                         },
                     }),
                 )
-                return json.loads(
+                planner_res = json.loads(
                     result.strip().removeprefix("```json").removesuffix("```").strip()
                 )
+                log.info(
+                    "Completed stage.spread_planner for session %s (planned %d spreads)",
+                    sid,
+                    len(planner_res.get("spreads", [])),
+                )
+                return planner_res
 
         bible_dict, planner_output = await asyncio.gather(_run_bible(), _run_planner())
         gcs.write_json(sid, "character_bible.json", data=bible_dict)
@@ -673,6 +755,12 @@ async def _run_pipeline(
     else:
         # ── 4 (resume). Spread planner only — bible already loaded from GCS ────
         with trace_stage("stage.spread_planner", session_id=sid):
+            log.info(
+                "Starting stage.spread_planner for session %s (model=%s, spreads=%d)",
+                sid,
+                settings.spread_planner_model,
+                len(state.spread_contents),
+            )
             await emit("planning_spreads", 41)
             planner_runner = _make_runner(spread_planner)
             planner_json_str = await _run_agent(
@@ -689,6 +777,11 @@ async def _run_pipeline(
             )
             planner_output = json.loads(
                 planner_json_str.strip().removeprefix("```json").removesuffix("```").strip()
+            )
+            log.info(
+                "Completed stage.spread_planner for session %s (planned %d spreads)",
+                sid,
+                len(planner_output.get("spreads", [])),
             )
 
     layout_spec = {
@@ -718,6 +811,12 @@ async def _run_pipeline(
     # ── 5. Generate images per spread (parallel) ──────────────────────────────
     total_spreads = len(state.spread_contents)
     with trace_stage("stage.generate_illustrations", session_id=sid, total_spreads=total_spreads):
+        log.info(
+            "Starting stage.generate_illustrations for session %s (total_spreads=%d, model=%s)",
+            sid,
+            total_spreads,
+            settings.image_model,
+        )
         image_sem = asyncio.Semaphore(settings.image_concurrency)
         llm_sem = asyncio.Semaphore(settings.llm_concurrency)
         ref_ready: asyncio.Event = asyncio.Event()
@@ -957,9 +1056,16 @@ async def _run_pipeline(
             for s in range(total_spreads)
             if results.get(s)
         ]
+        log.info(
+            "Completed stage.generate_illustrations for session %s (%d/%d spreads generated)",
+            sid,
+            len(results),
+            total_spreads,
+        )
 
     # ── 6. Compose PDFs ───────────────────────────────────────────────────────
     with trace_stage("stage.composite_pdf", session_id=sid):
+        log.info("Starting stage.composite_pdf for session %s", sid)
         await emit("composing_pdf", 92)
 
         spread_contexts = []
@@ -1008,6 +1114,7 @@ async def _run_pipeline(
         await emit("done", 100, session_id=sid)
         state.current_stage = "done"
         state.progress_pct = 100
+        log.info("Completed stage.composite_pdf for session %s: PDF composed and saved", sid)
         return state
 
 
@@ -1164,13 +1271,19 @@ async def _generate_with_retries(
                 )
 
                 if passed:
+                    log.info(
+                        "Spread %d illustration validated: passed=%s score=%.2f",
+                        spread_number,
+                        passed,
+                        score,
+                    )
                     return img_bytes
 
             log.warning(
-                "Image validation attempt %d failed for spread %d img %d",
-                attempt,
+                "Spread %d failed validation (attempt %d): %s — regenerating",
                 spread_number,
-                image_index,
+                attempt,
+                result[:200],
             )
 
             if attempt <= settings.image_max_retries:

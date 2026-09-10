@@ -30,6 +30,9 @@ echo ""
 echo "==> Authenticating Docker with Artifact Registry..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
+echo "==> Configuring kubectl credentials..."
+gcloud container clusters get-credentials "${GKE_CLUSTER:-storybook-cluster}" --region "${REGION}" --project "${PROJECT_ID}"
+
 echo "==> Building backend image..."
 docker buildx build --platform linux/amd64 --push \
   -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import logging
+import sys
+from typing import Any
 
+import httpx
 import pytest
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
@@ -13,6 +18,10 @@ from storybook.agents.image_validator import (
 from storybook.agents.image_validator import (
     record_validation_result,
 )
+from storybook.tools.gutenberg import (
+    fetch_gutenberg_url,
+    search_gutenberg,
+)
 from storybook.tracing import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_REQUEST_MODEL,
@@ -20,11 +29,13 @@ from storybook.tracing import (
     GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
     CloudLoggingTraceFilter,
+    GcpJsonFormatter,
     init_tracing,
     make_trace_url,
     set_project_id,
     set_span_token_usage,
     set_test_tracer_provider,
+    setup_logging,
     trace_agent_call,
     trace_retry_attempt,
     trace_stage,
@@ -250,3 +261,167 @@ def test_make_trace_url():
         "https://console.cloud.google.com/traces/list?"
         "tid=1234567890abcdef1234567890abcdef&project=my-storybook-proj"
     )
+
+
+def test_gcp_json_formatter(memory_exporter):
+    """Verify JSON output structure, severity mapping, timestamp, and trace/spanId injection."""
+    formatter = GcpJsonFormatter(project_id="test-proj")
+
+    # 1. Standard log record formatting
+    record = logging.LogRecord(
+        name="storybook.test",
+        level=logging.INFO,
+        pathname="/tmp/app.py",
+        lineno=42,
+        msg="Processing story for session %s",
+        args=("sess-001",),
+        exc_info=None,
+        func="test_func",
+    )
+    output = formatter.format(record)
+    data = json.loads(output)
+
+    assert data["severity"] == "INFO"
+    assert data["message"] == "Processing story for session sess-001"
+    assert "time" in data
+    dt = datetime.datetime.fromisoformat(data["time"])
+    assert dt.tzinfo is not None
+    assert data["logging.googleapis.com/sourceLocation"]["file"] == "/tmp/app.py"
+    assert data["logging.googleapis.com/sourceLocation"]["line"] == 42
+    assert data["logging.googleapis.com/sourceLocation"]["function"] == "test_func"
+
+    # 2. Severity mappings
+    for py_level, gcp_sev in [
+        (logging.DEBUG, "DEBUG"),
+        (logging.WARNING, "WARNING"),
+        (logging.ERROR, "ERROR"),
+        (logging.CRITICAL, "CRITICAL"),
+    ]:
+        rec = logging.LogRecord("test", py_level, "app.py", 1, "msg", (), None)
+        assert json.loads(formatter.format(rec))["severity"] == gcp_sev
+
+    # 3. Active span trace & spanId injection
+    with trace_stage("stage.test_active_span", session_id="sess-active"):
+        span_rec = logging.LogRecord("test", logging.INFO, "app.py", 10, "trace test", (), None)
+        span_data = json.loads(formatter.format(span_rec))
+        assert "logging.googleapis.com/trace" in span_data
+        assert span_data["logging.googleapis.com/trace"].startswith("projects/test-proj/traces/")
+        assert "logging.googleapis.com/spanId" in span_data
+        assert len(span_data["logging.googleapis.com/spanId"]) == 16
+        assert "logging.googleapis.com/trace_sampled" in span_data
+
+    # 4. Exception formatting
+    try:
+        raise ValueError("simulated pipeline error")
+    except ValueError:
+        exc_info = sys.exc_info()
+
+    err_rec = logging.LogRecord("test", logging.ERROR, "app.py", 99, "Stage failed", (), exc_info)
+    err_data = json.loads(formatter.format(err_rec))
+    assert "exception" in err_data
+    assert "ValueError: simulated pipeline error" in err_data["exception"]
+
+
+def test_gutenberg_fetch_spans(memory_exporter, monkeypatch):
+    """Mock httpx in gutenberg.py and verify gutenberg.search and download attempt spans."""
+    search_payload = {
+        "results": [
+            {
+                "id": 11,
+                "title": "Alice's Adventures in Wonderland",
+                "authors": [{"name": "Carroll, Lewis"}],
+                "formats": {
+                    "text/plain; charset=utf-8": "https://www.gutenberg.org/files/11/11-0.txt",
+                },
+            }
+        ]
+    }
+    book_text = (
+        "*** START OF THE PROJECT GUTENBERG EBOOK ALICE ***\n"
+        "Down the rabbit hole.\n"
+        "*** END OF THE PROJECT GUTENBERG EBOOK ALICE ***"
+    )
+
+    def mock_get(url, *args, **kwargs):
+        class MockResponse:
+            def __init__(
+                self,
+                status_code: int,
+                content: bytes,
+                text: str | None = None,
+                json_data: Any = None,
+            ):
+                self.status_code = status_code
+                self.content = content
+                self._text = text or content.decode("utf-8")
+                self._json = json_data
+
+            @property
+            def text(self) -> str:
+                return self._text
+
+            def json(self) -> Any:
+                return self._json
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    req = httpx.Request("GET", url)
+                    resp = httpx.Response(self.status_code, request=req)
+                    raise httpx.HTTPStatusError("HTTP error", request=req, response=resp)
+
+        if "gutendex.com" in url or "books" in url:
+            return MockResponse(200, b"", text="", json_data=search_payload)
+        return MockResponse(200, book_text.encode("utf-8"), text=book_text)
+
+    monkeypatch.setattr("storybook.tools.gutenberg.httpx.get", mock_get)
+
+    # 1. Search spans
+    results = search_gutenberg("Alice in Wonderland")
+    assert len(results) == 1
+    assert results[0]["id"] == 11
+
+    spans = memory_exporter.get_finished_spans()
+    search_spans = [s for s in spans if s.name == "gutenberg.search"]
+    assert len(search_spans) == 1
+    search_span = search_spans[0]
+    assert search_span.attributes["search.query"] == "Alice in Wonderland"
+    assert search_span.attributes["search.backend"] == "gutendex"
+    assert search_span.attributes["search.results_count"] == 1
+    assert "search.duration_ms" in search_span.attributes
+
+    # 2. Fetch and download attempt spans
+    text = fetch_gutenberg_url("https://www.gutenberg.org/files/11/11-0.txt")
+    assert "Down the rabbit hole." in text
+
+    spans = memory_exporter.get_finished_spans()
+    fetch_spans = [s for s in spans if s.name == "gutenberg.fetch"]
+    assert len(fetch_spans) == 1
+    fetch_span = fetch_spans[0]
+    assert fetch_span.attributes["gutenberg.url"] == "https://www.gutenberg.org/files/11/11-0.txt"
+    assert fetch_span.attributes["gutenberg.book_id"] == "11"
+
+    download_spans = [s for s in spans if s.name == "gutenberg.download_attempt"]
+    assert len(download_spans) == 1
+    download_span = download_spans[0]
+    assert download_span.attributes["http.url"] == "https://www.gutenberg.org/files/11/11-0.txt"
+    assert download_span.attributes["http.mirror_index"] == 1
+    assert download_span.attributes["http.attempt"] == 1
+    assert download_span.attributes["http.status_code"] == 200
+    assert download_span.attributes["download.bytes"] == len(book_text.encode("utf-8"))
+    assert "http.duration_ms" in download_span.attributes
+
+
+def test_setup_logging():
+    """Verify root logger gets GcpJsonFormatter without error and loggers propagate."""
+    setup_logging("test-setup-proj", level=logging.DEBUG)
+
+    root = logging.getLogger()
+    assert root.level == logging.DEBUG
+    assert len(root.handlers) == 1
+    handler = root.handlers[0]
+    assert isinstance(handler, logging.StreamHandler)
+    assert isinstance(handler.formatter, GcpJsonFormatter)
+    assert handler.formatter.project_id == "test-setup-proj"
+
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "storybook"):
+        assert logging.getLogger(logger_name).propagate is True

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import datetime
+import json
 import logging
+import sys
 from typing import Any
 
 from opentelemetry import trace
@@ -145,6 +148,129 @@ class CloudLoggingTraceFilter(logging.Filter):
                 setattr(record, "logging.googleapis.com/spanId", span_id_hex)
                 setattr(record, "logging.googleapis.com/trace_sampled", True)
         return True
+
+SEVERITY_MAP: dict[str, str] = {
+    "DEBUG": "DEBUG",
+    "INFO": "INFO",
+    "WARNING": "WARNING",
+    "WARN": "WARNING",
+    "ERROR": "ERROR",
+    "CRITICAL": "CRITICAL",
+    "FATAL": "CRITICAL",
+}
+
+
+class GcpJsonFormatter(logging.Formatter):
+    """Formats log records as single-line GCP Cloud Logging JSON entries."""
+
+    def __init__(self, project_id: str | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.project_id = project_id
+
+    def format(self, record: logging.LogRecord) -> str:
+        severity = SEVERITY_MAP.get(record.levelname.upper(), record.levelname)
+        record_time = datetime.datetime.fromtimestamp(
+            record.created, tz=datetime.UTC
+        ).isoformat()
+
+        entry: dict[str, Any] = {
+            "severity": severity,
+            "message": record.getMessage(),
+            "time": record_time,
+            "logging.googleapis.com/sourceLocation": {
+                "file": record.pathname,
+                "line": record.lineno,
+                "function": record.funcName,
+            },
+        }
+
+        # Span and trace correlation
+        span = trace.get_current_span()
+        if span is not None:
+            ctx = span.get_span_context()
+            if ctx is not None and ctx.is_valid:
+                proj = self.project_id or get_project_id() or "unknown"
+                trace_id_hex = f"{ctx.trace_id:032x}"
+                span_id_hex = f"{ctx.span_id:016x}"
+                entry["logging.googleapis.com/trace"] = (
+                    f"projects/{proj}/traces/{trace_id_hex}"
+                )
+                entry["logging.googleapis.com/spanId"] = span_id_hex
+                entry["logging.googleapis.com/trace_sampled"] = bool(
+                    ctx.trace_flags.sampled
+                )
+
+        # Fallback to record attributes if not populated from current span
+        if "logging.googleapis.com/trace" not in entry:
+            for k in (
+                "logging.googleapis.com/trace",
+                "logging.googleapis.com/spanId",
+                "logging.googleapis.com/trace_sampled",
+            ):
+                val = getattr(record, k, None)
+                if val is not None:
+                    entry[k] = val
+
+        # Exception formatting
+        if record.exc_info:
+            entry["exception"] = self.formatException(record.exc_info)
+        elif record.exc_text:
+            entry["exception"] = record.exc_text
+        if record.stack_info:
+            entry["stack_info"] = self.formatStack(record.stack_info)
+
+        # Include custom extra fields if present
+        standard_keys = {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "message",
+            "taskName",
+        }
+        for k, v in record.__dict__.items():
+            if k not in standard_keys and not k.startswith("_") and k not in entry:
+                try:
+                    json.dumps(v, default=str)
+                    entry[k] = v
+                except Exception:
+                    entry[k] = str(v)
+
+        return json.dumps(entry, default=str)
+
+
+def setup_logging(project_id: str = "", level: int = logging.INFO) -> None:
+    """Configure root, uvicorn, and storybook loggers with GCP structured JSON formatting."""
+    if project_id:
+        set_project_id(project_id)
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(GcpJsonFormatter(project_id=project_id or get_project_id()))
+    root.addHandler(handler)
+
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "storybook"):
+        lgr = logging.getLogger(logger_name)
+        lgr.handlers.clear()
+        lgr.propagate = True
 
 
 def init_tracing(project_id: str = "") -> None:
