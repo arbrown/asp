@@ -689,6 +689,9 @@ async def list_sessions_route(
         for sid in list(state_map.keys()):
             if sid in _sessions:
                 state_map[sid] = _sessions[sid]
+        for sid, active_state in _sessions.items():
+            if sid not in state_map:
+                state_map[sid] = active_state
         states = list(state_map.values())
     else:
         # Best-effort fallback: filter and sort in Python

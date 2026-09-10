@@ -443,6 +443,9 @@ async def _run_pipeline(
 ) -> PipelineState:
 
     async def emit(stage: str, pct: int, **extra):
+        if stage != "image_retry":
+            state.current_stage = stage
+        state.progress_pct = pct
         await progress_queue.put({"stage": stage, "pct": pct, **extra})
 
     sid = state.session_id

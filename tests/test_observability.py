@@ -425,3 +425,30 @@ def test_setup_logging():
 
     for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "storybook"):
         assert logging.getLogger(logger_name).propagate is True
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_overlays_active_in_memory():
+    """Verify that list_sessions_route includes active running sessions from _sessions with live progress."""
+    from unittest.mock import AsyncMock, patch
+    from storybook.models import PipelineState, SessionConfig, SourceConfig
+    from storybook.api.routes import _sessions, list_sessions_route
+
+    sid = "test-active-overlay"
+    state = PipelineState(
+        session_id=sid,
+        config=SessionConfig(source=SourceConfig(title="Test Book", author="Test Author")),
+        current_stage="adapting_text",
+        progress_pct=35,
+    )
+    _sessions[sid] = state
+    try:
+        with patch("storybook.api.routes.store.list_sessions", new_callable=AsyncMock) as mock_list:
+            mock_list.return_value = []
+            results = await list_sessions_route()
+            active = next((r for r in results if r.session_id == sid), None)
+            assert active is not None
+            assert active.current_stage == "adapting_text"
+            assert active.progress_pct == 35
+    finally:
+        _sessions.pop(sid, None)
