@@ -558,7 +558,7 @@ async def _run_pipeline(
                 "Starting stage.story_adapter for session %s (chunks=%d, model=%s)",
                 sid,
                 n_chunks,
-                settings.story_adapter_model,
+                settings.model_adapter,
             )
             if n_chunks > 1:
                 log.info("Source text is large (%d words) — adapting in %d chunks",
@@ -680,7 +680,7 @@ async def _run_pipeline(
                 log.info(
                     "Starting stage.character_bible for session %s (model=%s)",
                     sid,
-                    settings.character_bible_model,
+                    settings.model_fast,
                 )
                 if settings.text_two_pass:
                     # Refresh roster against final adapted text; voice_fingerprint stays
@@ -722,7 +722,7 @@ async def _run_pipeline(
                 log.info(
                     "Starting stage.spread_planner for session %s (model=%s, spreads=%d)",
                     sid,
-                    settings.spread_planner_model,
+                    settings.model_fast,
                     len(state.spread_contents),
                 )
                 runner = _make_runner(spread_planner)
@@ -758,7 +758,7 @@ async def _run_pipeline(
             log.info(
                 "Starting stage.spread_planner for session %s (model=%s, spreads=%d)",
                 sid,
-                settings.spread_planner_model,
+                settings.model_fast,
                 len(state.spread_contents),
             )
             await emit("planning_spreads", 41)
@@ -815,7 +815,7 @@ async def _run_pipeline(
             "Starting stage.generate_illustrations for session %s (total_spreads=%d, model=%s)",
             sid,
             total_spreads,
-            settings.image_model,
+            settings.model_image,
         )
         image_sem = asyncio.Semaphore(settings.image_concurrency)
         llm_sem = asyncio.Semaphore(settings.llm_concurrency)
