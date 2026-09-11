@@ -55,22 +55,48 @@ _ART_STYLE_SEEDS = [
     "Early 20th-century travel poster with flat color planes and bold atmospheric lighting",
 ]
 
+# Western-canon buckets. Each entry names concrete, widely-recognized exemplars so the
+# model anchors on stories an ordinary American adult already knows, rather than drifting
+# to obscure sources. Skewed toward English-language works, with the major Continental,
+# Classical, and Russian pillars represented.
 _TRADITION_SEEDS = [
-    "West African folklore or trickster fables (e.g. Anansi stories, Yoruba fables)",
-    "Celtic, Irish, or Scottish fairy and sea folklore (selkies, changelings, ancient bards)",
-    "Persian or Middle Eastern classical literature (Kalila wa Dimna, 1001 Nights, Attar's Conference of the Birds)",
-    "Indigenous North American or Mesoamerican legends and origin tales",
-    "South Asian classical fables and animal tales (Panchatantra, Buddhist Jataka tales)",
-    "East Asian folklore and classical tales (Chinese folk fables, Japanese Otogizōshi, Korean folktales)",
-    "Scandinavian and Nordic folklore (Asbjørnsen and Moe, Kalevala episodes, troll fables)",
-    "Slavic, Baltic, or Russian fairy tales (Afanasyev, Baba Yaga, Firebird, Vasilisa)",
-    "Classical Greco-Roman mythology or lesser-known Aesop fables",
-    "Latin American, Andean, or Caribbean folklore (folk heroes, rainforest animal myths)",
-    "French Renaissance and 17th-century fables (Jean de La Fontaine, Madame d'Aulnoy)",
-    "19th-century speculative, gothic, or early fantasy (Jules Verne, H.G. Wells, George MacDonald, E. Nesbit)",
-    "Romantic, Victorian, or ancient poetry adapted to storybook narrative (Coleridge, Tennyson, Christina Rossetti, Li Bai, Basho, Rumi)",
-    "American tall tales and frontier folklore (Paul Bunyan, Pecos Bill, John Henry)",
-    "Lesser-known European folk & fairy tales (Brothers Grimm deep cuts, Hans Christian Andersen lesser-known tales)",
+    "Greek mythology and epic (the Odyssey, the Trojan horse, Theseus and the Minotaur, "
+    "Icarus, King Midas, Pandora's box, Persephone, Perseus and Medusa, the labors of Hercules)",
+    "Aesop's best-known fables (the Tortoise and the Hare, the Boy Who Cried Wolf, the Lion "
+    "and the Mouse, the Ant and the Grasshopper, the Fox and the Grapes, the Goose that Laid the Golden Eggs)",
+    "Roman and Latin classics (Ovid's Metamorphoses — Echo and Narcissus, Daedalus, Arachne; "
+    "Romulus and Remus; Virgil's Aeneid; Androcles and the Lion)",
+    "Norse mythology (Thor and his hammer, Loki's tricks, Odin, Fenrir, the rainbow bridge, Ragnarok)",
+    "Arthurian legend and English medieval romance (King Arthur, the sword in the stone, Excalibur, "
+    "the Round Table, Merlin, Sir Gawain and the Green Knight, Robin Hood)",
+    "Grimm and Andersen headline fairy tales (Cinderella, Hansel and Gretel, Snow White, Rumpelstiltskin, "
+    "the Bremen Town Musicians; the Ugly Duckling, the Little Mermaid, the Emperor's New Clothes, the Princess and the Pea)",
+    "French classics (Perrault — Puss in Boots, Sleeping Beauty, Little Red Riding Hood, Cinderella; "
+    "Beauty and the Beast; La Fontaine's fables; Jules Verne — Around the World in Eighty Days, 20,000 Leagues; "
+    "Dumas — The Three Musketeers; Hugo — The Hunchback of Notre-Dame)",
+    "Spanish and Italian classics (Cervantes' Don Quixote and the windmills; Collodi's Pinocchio; "
+    "Dante's Inferno; the tale of El Cid)",
+    "Russian classics and Russian fairy tales (Pushkin — The Tale of Tsar Saltan, The Golden Cockerel; "
+    "the Firebird; Baba Yaga; Vasilisa the Beautiful; Tolstoy's short tales for children)",
+    "English children's classics (Alice's Adventures in Wonderland, The Wind in the Willows, Peter Pan, "
+    "The Jungle Book, Just So Stories, The Tale of Peter Rabbit, The Secret Garden, A Little Princess, The Velveteen Rabbit)",
+    "American classics (Tom Sawyer, Huckleberry Finn, Rip Van Winkle, The Legend of Sleepy Hollow, "
+    "Little Women, The Call of the Wild, The Wonderful Wizard of Oz, Moby-Dick, The Last of the Mohicans)",
+    "British adventure and Victorian favorites (Treasure Island, Robinson Crusoe, Gulliver's Travels, "
+    "The Swiss Family Robinson, A Christmas Carol, Oliver Twist, Dr. Jekyll and Mr. Hyde, The Three Little Pigs)",
+    "Narrative poems that everyone half-remembers (The Rime of the Ancient Mariner, Paul Revere's Ride, "
+    "The Charge of the Light Brigade, Jabberwocky, The Owl and the Pussycat, Casey at the Bat, "
+    "A Visit from St. Nicholas, The Pied Piper of Hamelin)",
+    "Shakespeare adapted for children (A Midsummer Night's Dream, The Tempest, Macbeth's witches, "
+    "Romeo and Juliet, Twelfth Night — Lamb's Tales from Shakespeare is the usual doorway)",
+    "Gothic and early science fiction (Frankenstein, Dracula, The Time Machine, The War of the Worlds, "
+    "Poe's The Raven, The Legend of the Headless Horseman, A Connecticut Yankee in King Arthur's Court)",
+    "The Arabian Nights as the West received it (Aladdin and the lamp, Ali Baba and the Forty Thieves, "
+    "the voyages of Sinbad, Scheherazade)",
+    "American tall tales and frontier folklore (Paul Bunyan and Babe, Johnny Appleseed, Pecos Bill, "
+    "John Henry, Davy Crockett)",
+    "Allegory and quest literature (The Pilgrim's Progress, Milton's Paradise Lost, Homer's Iliad, "
+    "Jason and the Argonauts, the Fables of Bidpai as retold in Europe)",
 ]
 
 _MOOD_SEEDS = [
@@ -108,14 +134,28 @@ def _build_lucky_prompt() -> str:
 
     return f"""You are a children's-book art director picking ONE storybook config.
 
-Choose a real public-domain source and an unexpected artistic treatment. Surprise me.
+Choose a WELL-KNOWN classic of the Western canon and give it an unexpected artistic
+treatment. The surprise should come from the art direction, the age band, and which
+episode you adapt — NOT from digging up an obscure source.
 
 CRITICAL EXCLUSIONS — RECENT RUNS (DO NOT REPEAT ANY OF THESE AUTHORS, TITLES, OR STYLES):
 {recency_exclusions}
-- Also strictly avoid: Rudyard Kipling, Alice in Wonderland, and Soviet constructivism.
+
+THE RECOGNITION BAR (this is the most important constraint):
+An average, reasonably well-read American adult must recognize the title on sight, and
+should usually be able to summarize the plot from memory. Think "the kind of book that
+shows up on a high-school reading list, a Disney adaptation, or a shelf of children's
+classics." If you find yourself picking something you'd have to explain, pick again.
+- Strongly prefer English-language works. Major French, Spanish, Italian, German,
+  Russian, Greek, and Latin classics are welcome, but only their famous ones.
+- Vary the era, country, and genre from run to run — do not settle into one shelf.
+- Choose a real public-domain work available on Project Gutenberg.
+- Avoid: obscure regional folklore, minor works by famous authors, and anthologies no
+  one outside a literature department has heard of.
 
 CREATIVE CATALYSTS FOR THIS RUN (Draw strong inspiration from these; do not default to generic standbys):
-- Literary / Cultural traditions to explore:
+- Canon shelves to draw from — pick a famous title from one of these, or from the
+  Western canon broadly if neither shelf inspires you:
   * {tradition_sample[0]}
   * {tradition_sample[1]}
 - Art direction sparks (pick one or riff creatively):
@@ -132,9 +172,10 @@ land at 4-5 or 6-7. Adventure abridgements and richer myths land at 8-9 or 10-12
 default to the oldest band — most of these sources should be adapted DOWN to the child.
 
 SOURCES:
-Pick a real public-domain work or author available on Project Gutenberg that fits one of the
-catalyst traditions above or another unexpected public-domain source.
-Treat all sources as ABRIDGEABLE — e.g. adapt a single chapter, fable, episode, or canto to the chosen age band.
+Treat all sources as ABRIDGEABLE — the interesting move is taking a big, famous work and
+adapting ONE chapter, fable, episode, myth, or canto down to the chosen age band. A
+Moby-Dick for six-year-olds or a single labor of Hercules for toddlers is exactly the
+kind of stretch this tool exists to test.
 
 LAYOUT + TYPOGRAPHY — pick one of each and weave them naturally into `image_spec`:
 - Layout: full-bleed-with-text-panel | top-2/3-image / bottom-text | left-image / right-text
@@ -273,13 +314,20 @@ children's book adaptation.
 What we know so far about the project:
 {context}
 
-If a target age is given, pick a source the kid in that band would actually enjoy
-(toddlers want short animal tales; 10-12 can take Verne or Pushkin). If a text_spec
-is given (e.g. a poetic form), pick a source compatible with that form. If image_spec
-suggests a culture or era, lean into a source from that tradition.
+THE RECOGNITION BAR: pick a well-known classic of the Western canon — something an
+average, reasonably well-read American adult would recognize on sight and could usually
+summarize from memory. Skew English-language; famous French, Spanish, Italian, German,
+Russian, Greek, and Latin classics are also welcome. Avoid obscure regional folklore and
+minor works by famous authors.
 
-Return JSON: title (exact title from Project Gutenberg), author. Be surprising —
-don't default to Alice, Peter Rabbit, or Rudyard Kipling.
+If a target age is given, pick a source the kid in that band would actually enjoy
+(toddlers want short animal tales and simple fables; 10-12 can take Treasure Island,
+Verne, or the Odyssey). If a text_spec is given (e.g. a poetic form), pick a source
+compatible with that form. If image_spec suggests a culture or era, lean into a canon
+work from that tradition.
+
+Return JSON: title (exact title from Project Gutenberg), author. Surprise me with WHICH
+classic — vary era, country, and genre — but stay inside the canon.
 """
 
 _SHUFFLE_TEXT_SPEC = """You are choosing a literary/narrative form for ONE storybook

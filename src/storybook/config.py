@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     image_concurrency: int = 3
 
     # Max simultaneous LLM calls (prompt generation + validation combined)
-    llm_concurrency: int = 5
+    llm_concurrency: int = 3
 
     # rqlite database URL — defaults to the k8s ClusterIP service name
     rqlite_url: str = "http://rqlite:4001"
