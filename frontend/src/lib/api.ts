@@ -68,7 +68,12 @@ export async function getLuckyConfig(): Promise<LuckyConfig> {
   return res.json();
 }
 
-export type ShuffleField = "title_author" | "text_spec" | "image_spec" | "custom_instructions";
+export type ShuffleField =
+  | "title_author"
+  | "text_spec"
+  | "image_spec"
+  | "custom_instructions"
+  | "page_count";
 
 export interface ShuffleResponse {
   title?: string;
@@ -76,6 +81,7 @@ export interface ShuffleResponse {
   text_spec?: string;
   image_spec?: string;
   custom_instructions?: string;
+  page_count?: number;
 }
 
 export interface ShuffleRequest {
@@ -83,6 +89,7 @@ export interface ShuffleRequest {
   title?: string;
   author?: string;
   target_age?: string;
+  page_count?: number;
   text_spec?: string;
   image_spec?: string;
   custom_instructions?: string;

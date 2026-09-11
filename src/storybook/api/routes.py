@@ -121,7 +121,17 @@ _lucky_history: deque[dict[str, str]] = deque(
 )
 
 
-def _build_lucky_prompt() -> str:
+def _sample_page_count() -> int:
+    """Sample page count from a normal distribution with mean 24, stdev 4.
+
+    Clamped to [6, 64] to match the supported page count range.
+    """
+    return max(6, min(64, round(random.gauss(24, 4))))
+
+
+def _build_lucky_prompt(page_count: int | None = None) -> str:
+    if page_count is None:
+        page_count = _sample_page_count()
     styles_sample = random.sample(_ART_STYLE_SEEDS, 3)
     tradition_sample = random.sample(_TRADITION_SEEDS, 2)
     mood = random.choice(_MOOD_SEEDS)
@@ -175,7 +185,8 @@ SOURCES:
 Treat all sources as ABRIDGEABLE — the interesting move is taking a big, famous work and
 adapting ONE chapter, fable, episode, myth, or canto down to the chosen age band. A
 Moby-Dick for six-year-olds or a single labor of Hercules for toddlers is exactly the
-kind of stretch this tool exists to test.
+kind of stretch this tool exists to test. Scope the narrative arc and pacing to fit
+{page_count} pages.
 
 LAYOUT + TYPOGRAPHY — pick one of each and weave them naturally into `image_spec`:
 - Layout: full-bleed-with-text-panel | top-2/3-image / bottom-text | left-image / right-text
@@ -196,7 +207,7 @@ D. Character voice + story beats: one character's distinctive speech, plus the e
 Return JSON:
 - title, author: exact title and author as they appear on Project Gutenberg
 - target_age: literal "2-3" | "4-5" | "6-7" | "8-9" | "10-12" (vary widely!)
-- page_count: integer between 10 and 20
+- page_count: integer, exactly {page_count}
 - text_spec: 1-3 sentences describing the form, or "" for plain prose
 - image_spec: 2-3 sentences combining art direction + layout + typography
 - custom_instructions: 2-4 sentences in your chosen strategy
@@ -221,8 +232,9 @@ def _generate_lucky() -> dict:
     from google.genai import types as gtypes
     from storybook.config import settings
 
+    page_count = _sample_page_count()
     client = genai.Client(vertexai=True, project=settings.gcp_project_id, location="global")
-    prompt = _build_lucky_prompt()
+    prompt = _build_lucky_prompt(page_count=page_count)
     response = client.models.generate_content(
         model=settings.model_fast,
         contents=prompt,
@@ -235,6 +247,7 @@ def _generate_lucky() -> dict:
         ),
     )
     result = json.loads(response.text)
+    result["page_count"] = page_count
     _lucky_history.append(
         {
             "title": result.get("title", ""),
@@ -261,6 +274,7 @@ ShuffleField = Literal[
     "text_spec",
     "image_spec",
     "custom_instructions",
+    "page_count",
 ]
 
 
@@ -269,6 +283,7 @@ class ShuffleRequest(BaseModel):
     title: str = ""
     author: str = ""
     target_age: str = ""
+    page_count: Optional[int] = None
     text_spec: str = ""
     image_spec: str = ""
     custom_instructions: str = ""
@@ -281,6 +296,7 @@ class ShuffleResponse(BaseModel):
     text_spec: Optional[str] = None
     image_spec: Optional[str] = None
     custom_instructions: Optional[str] = None
+    page_count: Optional[int] = None
 
 
 def _shuffle_context(req: ShuffleRequest) -> str:
@@ -374,6 +390,9 @@ Return JSON: {{ "value": "<2-4 sentence custom instructions>" }}.
 
 
 def _shuffle(req: ShuffleRequest) -> ShuffleResponse:
+    if req.field == "page_count":
+        return ShuffleResponse(page_count=_sample_page_count())
+
     from google import genai
     from google.genai import types as gtypes
     from storybook.config import settings

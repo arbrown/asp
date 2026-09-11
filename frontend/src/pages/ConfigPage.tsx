@@ -69,6 +69,7 @@ export default function ConfigPage() {
           title: result.title ?? f.source.title,
           author: result.author ?? f.source.author,
         },
+        page_count: result.page_count ?? f.page_count,
         text_spec: result.text_spec ?? f.text_spec,
         image_spec: result.image_spec ?? f.image_spec,
         custom_instructions: result.custom_instructions ?? f.custom_instructions,
@@ -252,7 +253,12 @@ export default function ConfigPage() {
                 ))}
               </select>
             </Field>
-            <Field label="Page count">
+            <Field
+              label="Page count"
+              onShuffle={() => handleShuffle("page_count")}
+              shuffling={shuffling === "page_count"}
+              shuffleHint="Shuffle page count (avg 24, stdev 4)"
+            >
               <input
                 type="number"
                 min={6}
@@ -413,10 +419,42 @@ function SectionHeader({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+  onShuffle,
+  shuffling,
+  shuffleHint,
+}: {
+  label: string;
+  children: React.ReactNode;
+  onShuffle?: () => void;
+  shuffling?: boolean;
+  shuffleHint?: string;
+}) {
   return (
     <div>
-      <label className="block text-sm font-medium text-sepia-900 mb-1">{label}</label>
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-sm font-medium text-sepia-900">{label}</label>
+        {onShuffle && (
+          <button
+            type="button"
+            onClick={onShuffle}
+            disabled={shuffling}
+            title={shuffleHint}
+            aria-label={shuffleHint}
+            className="p-1 rounded text-sepia-400 hover:text-sepia-900 hover:bg-sepia-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {shuffling ? (
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" d="M12 3a9 9 0 1 0 9 9" />
+              </svg>
+            ) : (
+              <DiceIcon className="w-3.5 h-3.5" />
+            )}
+          </button>
+        )}
+      </div>
       {children}
     </div>
   );

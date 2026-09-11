@@ -10,6 +10,7 @@ from storybook.api.routes import (
     _build_lucky_prompt,
     _generate_lucky,
     _lucky_history,
+    _sample_page_count,
     _shuffle,
     ShuffleRequest,
 )
@@ -87,3 +88,33 @@ class TestLuckyAndShuffle(unittest.TestCase):
             prompt = captured_prompts[0]
             # Ensure static 'constructivist' was replaced with dynamic seeds
             self.assertTrue(any(seed in prompt for seed in _ART_STYLE_SEEDS))
+
+    def test_sample_page_count_distribution(self):
+        import statistics
+
+        samples = [_sample_page_count() for _ in range(1000)]
+        mean = statistics.mean(samples)
+        stdev = statistics.stdev(samples)
+
+        # Average ~24, stdev ~4
+        self.assertGreater(mean, 23.0)
+        self.assertLess(mean, 25.0)
+        self.assertGreater(stdev, 3.4)
+        self.assertLess(stdev, 4.6)
+
+        # Bounds
+        for s in samples:
+            self.assertGreaterEqual(s, 6)
+            self.assertLessEqual(s, 64)
+
+    def test_build_lucky_prompt_page_count(self):
+        prompt = _build_lucky_prompt(page_count=28)
+        self.assertIn("28 pages", prompt)
+        self.assertIn("- page_count: integer, exactly 28", prompt)
+
+    def test_shuffle_page_count(self):
+        req = ShuffleRequest(field="page_count")
+        res = _shuffle(req)
+        self.assertIsNotNone(res.page_count)
+        self.assertGreaterEqual(res.page_count, 6)
+        self.assertLessEqual(res.page_count, 64)
