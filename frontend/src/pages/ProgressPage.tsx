@@ -28,6 +28,7 @@ export default function ProgressPage() {
   const [pct, setPct] = useState(0);
   const [stage, setStage] = useState("initializing");
   const [done, setDone] = useState(false);
+  const [adaptedFromSource, setAdaptedFromSource] = useState<boolean | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Crossfade image preview
@@ -81,6 +82,14 @@ export default function ProgressPage() {
         setEvents((prev) => [...prev, e]);
         if (e.pct != null) setPct(e.pct);
         if (e.stage !== "image_retry") setStage(e.stage);
+        if (e.adapted_from_source != null) {
+          setAdaptedFromSource(e.adapted_from_source);
+        } else if (
+          e.message?.includes("not found on Gutenberg") ||
+          e.message?.includes("model weights")
+        ) {
+          setAdaptedFromSource(false);
+        }
         if (e.stage === "generating_image" && (e.message === "done" || e.message === "cached") && e.spread != null) {
           tryShowImage(e.spread);
         }
@@ -106,6 +115,20 @@ export default function ProgressPage() {
     <div className="max-w-6xl mx-auto">
       <h1 className="text-2xl font-serif font-bold text-sepia-900 mb-2">Creating Your Storybook</h1>
       <p className="text-sm text-sepia-600 font-mono mb-6">{id}</p>
+
+      {adaptedFromSource === false && (
+        <div className="mb-6 p-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 flex items-start gap-3 shadow-sm">
+          <svg className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <div>
+            <p className="font-semibold text-sm">Not Adapted from Project Gutenberg Source Text</p>
+            <p className="text-xs text-amber-800 mt-0.5">
+              The exact text was not found on Project Gutenberg. The story is being adapted directly from model weights.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-8 items-start">
         {/* Left: progress + log */}

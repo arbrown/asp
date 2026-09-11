@@ -179,7 +179,15 @@ function SessionCard({ session }: { session: SessionSummary }) {
                 {session.session_id.slice(0, 8)}…
               </p>
             </div>
-            <StatusBadge stage={session.current_stage} />
+            <div className="flex flex-col items-end gap-1.5 shrink-0">
+              <StatusBadge stage={session.current_stage} />
+              {session.adapted_from_source === false && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  Model Weights (No Source Text)
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Timing row */}

@@ -28,6 +28,7 @@ export interface SessionSummary {
   resumable?: boolean;
   started_at?: string;
   finished_at?: string;
+  adapted_from_source?: boolean;
 }
 
 export interface ProgressEvent {
@@ -41,6 +42,7 @@ export interface ProgressEvent {
   session_id?: string;
   attempt?: number;
   reason?: string;
+  adapted_from_source?: boolean;
 }
 
 export interface LuckyConfig {

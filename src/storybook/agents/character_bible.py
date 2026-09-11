@@ -28,7 +28,11 @@ draft bible from one segment of a public-domain work. A later merge step will
 reconcile your draft with the bibles for the other segments.
 
 Input JSON:
-- `source_text`: one chunk of the original work (may be the whole work or one segment)
+- `source_text`: one chunk of the original work (may be the whole work or one segment).
+  CRITICAL: If `source_text` is empty or no source text was found on Gutenberg, draw
+  directly upon your deep internal knowledge of the classic work specified in `config`
+  (e.g. `config.title` / `config.source.title`, `config.author`) to establish the
+  characters, visual world, and voice fingerprint.
 - `config.image_spec`: optional illustration style spec (e.g. "watercolor", "pen and ink")
 - `config.target_age`: audience age group ("4-5", "6-8", "9-12")
 - `config.text_spec`: optional poetic form spec

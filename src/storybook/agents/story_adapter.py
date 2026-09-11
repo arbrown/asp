@@ -15,7 +15,12 @@ from storybook.config import settings
 # ── Shared structural rules ───────────────────────────────────────────────────
 
 BASE_INSTRUCTION = """You will receive a JSON object containing:
-- `source_text`: the original public-domain work (or one chunk of it)
+- `source_text`: the original public-domain work (or one chunk of it).
+  CRITICAL: If `source_text` is empty, or if the exact text was not found on Project
+  Gutenberg, adapt the story directly from your deep model knowledge of the requested
+  classic work, title, and author in `config` (e.g. `config.source.title` / `config.title`).
+  Faithfully recreate the beloved narrative arc, characters, and key scenes without relying
+  on a downloaded source text.
 - `config`: session configuration including:
   - `target_age`: age range string ("4-5", "6-8", "9-12")
   - `text_spec`: optional poetic/format constraint
@@ -74,7 +79,9 @@ TEXT RULES (applies to verso_text and recto_text)
 Age guidelines for text (the active bands; legacy 6-8 ≈ 6-7, 9-12 ≈ 10-12):
 - 2-3:   Toddler / board book. ≤8 words per page. Naming, sound words, single
          actions ("The cat sleeps."). Rhythm and repetition above all.
-- 4-5:   Pre-K. Very short sentences. Concrete, simple language. Rhyme welcome.
+- 4-5:   Pre-K. Simple, rhythmic sentences with natural spoken cadence. Concrete
+         language, refrain, and varied sentence openings (avoid starting every
+         sentence with 'He', 'She', or the character's name). Rhyme welcome.
 - 6-7:   K-1 / early reader. Simple sentences with light dialogue. A small
          decodable vocabulary, occasional surprising word.
 - 8-9:   Grade 2-3. Compound sentences. Descriptive language, some metaphor.

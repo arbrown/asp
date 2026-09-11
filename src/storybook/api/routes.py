@@ -453,6 +453,7 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
         resumable=state.current_stage == "error" or (state.current_stage != "done" and not is_running),
         started_at=state.started_at,
         finished_at=state.finished_at,
+        adapted_from_source=state.adapted_from_source,
     )
 
 
@@ -468,6 +469,7 @@ def _session_meta(state: PipelineState) -> dict:
         "errors": state.errors,
         "started_at": state.started_at,
         "finished_at": state.finished_at,
+        "adapted_from_source": state.adapted_from_source,
     }
 
 

@@ -23,6 +23,7 @@ class SessionResponse(BaseModel):
     resumable: bool = False
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    adapted_from_source: bool = True
 
 
 class ProgressEvent(BaseModel):
@@ -37,3 +38,4 @@ class ProgressEvent(BaseModel):
     session_id: Optional[str] = None
     attempt: Optional[int] = None
     reason: Optional[str] = None
+    adapted_from_source: Optional[bool] = None

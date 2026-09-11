@@ -333,3 +333,82 @@ def fetch_gutenberg_url(url: str) -> str:
             text = text[: m.start()]
 
         return text.strip()
+
+
+def _normalize_title(s: str | None) -> str:
+    if not s:
+        return ""
+    s = s.lower()
+    # Strip subtitles after colon, semicolon, dash, or " -- "
+    s = re.split(r"[:;—–]| - ", s)[0]
+    # Remove leading articles: 'the ', 'a ', 'an '
+    s = re.sub(r"^(the|a|an)\s+", "", s)
+    # Remove non-alphanumeric characters except spaces
+    s = re.sub(r"[^\w\s]", "", s)
+    return " ".join(s.split())
+
+
+def _significant_words(s: str) -> set[str]:
+    stopwords = {"the", "a", "an", "and", "on", "of", "in", "to", "for", "with", "by", "at", "from"}
+    return {w for w in s.split() if w not in stopwords}
+
+
+def _author_matches(query_author: str | None, cand_authors: list[str]) -> bool:
+    if not query_author:
+        return True
+    qa_norm = re.sub(r"[^\w\s]", "", query_author.lower()).split()
+    if not qa_norm:
+        return True
+    qa_last = qa_norm[-1]
+    for ca in cand_authors:
+        ca_norm = re.sub(r"[^\w\s]", "", ca.lower())
+        if qa_last in ca_norm or any(part in ca_norm for part in qa_norm if len(part) > 3):
+            return True
+    return False
+
+
+def is_exact_gutenberg_match(
+    query_title: str | None,
+    query_author: str | None,
+    candidate: dict,
+) -> bool:
+    """Check whether a search candidate accurately matches the requested title/author."""
+    cand_title = candidate.get("title", "")
+    norm_q = _normalize_title(query_title)
+    norm_c = _normalize_title(cand_title)
+
+    if not norm_q or not norm_c:
+        return False
+
+    if query_author and not _author_matches(query_author, candidate.get("authors", [])):
+        return False
+
+    if norm_q == norm_c:
+        return True
+
+    q_words = _significant_words(norm_q)
+    c_words = _significant_words(norm_c)
+
+    if not q_words:
+        return False
+
+    if q_words == c_words:
+        return True
+    if q_words.issubset(c_words) and len(c_words) - len(q_words) <= 2:
+        return True
+    if c_words.issubset(q_words) and len(q_words) - len(c_words) <= 2:
+        return True
+
+    return False
+
+
+def find_matching_gutenberg_candidate(
+    query_title: str | None,
+    query_author: str | None,
+    candidates: list[dict],
+) -> dict | None:
+    """Find the first candidate from Gutenberg search results that actually matches the query."""
+    for cand in candidates:
+        if is_exact_gutenberg_match(query_title, query_author, cand):
+            return cand
+    return None

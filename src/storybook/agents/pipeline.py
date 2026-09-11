@@ -71,7 +71,11 @@ from storybook.models import (
     SpreadPlan,
 )
 from storybook.tools import gcs
-from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
+from storybook.tools.gutenberg import (
+    fetch_gutenberg_url,
+    find_matching_gutenberg_candidate,
+    search_gutenberg,
+)
 from storybook.tracing import (
     SpanContextManager,
     get_tracer,
@@ -333,9 +337,12 @@ async def _seed_bible_for_chunk(
     seed_input: dict = {
         "source_text": chunk["text"],
         "config": {
+            "title": cfg.source.title,
+            "author": cfg.source.author,
             "image_spec": cfg.image_spec,
             "target_age": cfg.target_age,
             "text_spec": cfg.text_spec,
+            "custom_instructions": cfg.custom_instructions,
         },
     }
     if chunk["chunk_context"]:
@@ -361,6 +368,8 @@ async def _draft_chunk(
     chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
     adapter_config: dict = {
         **cfg.model_dump(),
+        "title": cfg.source.title,
+        "author": cfg.source.author,
         "spread_count": chunk["spread_count"],
         "spreads_meta": chunk["spreads_meta"],
     }
@@ -407,6 +416,8 @@ async def _craft_chunk(
     chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
     adapter_config: dict = {
         **cfg.model_dump(),
+        "title": cfg.source.title,
+        "author": cfg.source.author,
         "spread_count": chunk["spread_count"],
         "spreads_meta": chunk["spreads_meta"],
     }
@@ -538,6 +549,7 @@ async def _run_pipeline(
                 state.source_text = await asyncio.to_thread(
                     fetch_gutenberg_url, cfg.source.gutenberg_url
                 )
+                state.adapted_from_source = True
             else:
                 candidates = [
                     cfg.source.title,
@@ -556,43 +568,65 @@ async def _run_pipeline(
                     )
                     if results:
                         break
-                if not results:
-                    raise RuntimeError(
-                        f"No Gutenberg results found for: "
-                        f"{cfg.source.title!r} / {cfg.source.author!r}"
+
+                matched_candidate = (
+                    find_matching_gutenberg_candidate(cfg.source.title, cfg.source.author, results)
+                    if results
+                    else None
+                )
+
+                if matched_candidate:
+                    log.info(
+                        "Found matching Gutenberg candidate: %r (%s)",
+                        matched_candidate.get("title"),
+                        matched_candidate["download_url"],
                     )
+                    state.source_text = await asyncio.to_thread(
+                        fetch_gutenberg_url, matched_candidate["download_url"]
+                    )
+                    state.adapted_from_source = True
+                else:
+                    log.warning(
+                        "Exact text for %r by %r not found on Project Gutenberg; adapting story directly from model weights.",
+                        cfg.source.title,
+                        cfg.source.author,
+                    )
+                    state.source_text = ""
+                    state.adapted_from_source = False
+                    await emit(
+                        "fetching",
+                        10,
+                        message="Exact text not found on Gutenberg; adapting directly from model weights",
+                        adapted_from_source=False,
+                    )
+
+            if state.adapted_from_source:
                 log.info(
-                    "Downloading selected candidate: %r (%s)",
-                    results[0].get("title"),
-                    results[0]["download_url"],
-                )
-                state.source_text = await asyncio.to_thread(
-                    fetch_gutenberg_url, results[0]["download_url"]
+                    "Literature fetch complete for session %s: downloaded %d chars (%d words)",
+                    sid,
+                    len(state.source_text),
+                    len(state.source_text.split()),
                 )
 
-            log.info(
-                "Literature fetch complete for session %s: downloaded %d chars (%d words)",
-                sid,
-                len(state.source_text),
-                len(state.source_text.split()),
-            )
+                with SpanContextManager(
+                    "gcs.write_source_text",
+                    attributes={
+                        "gcs.bucket": settings.gcs_artifacts_bucket,
+                        "gcs.path": f"sessions/{sid}/original/source_text.txt",
+                        "text.length_chars": len(state.source_text),
+                        "text.length_words": len(state.source_text.split()),
+                    },
+                ):
+                    gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+                log.info(
+                    "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
+                    settings.gcs_artifacts_bucket,
+                    sid,
+                )
+                await emit("fetching", 10, message="Source text fetched", adapted_from_source=True)
+            else:
+                log.info("Proceeding to story adaptation without source text for session %s", sid)
 
-            with SpanContextManager(
-                "gcs.write_source_text",
-                attributes={
-                    "gcs.bucket": settings.gcs_artifacts_bucket,
-                    "gcs.path": f"sessions/{sid}/original/source_text.txt",
-                    "text.length_chars": len(state.source_text),
-                    "text.length_words": len(state.source_text.split()),
-                },
-            ):
-                gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
-            log.info(
-                "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
-                settings.gcs_artifacts_bucket,
-                sid,
-            )
-            await emit("fetching", 10, message="Source text fetched")
             log.info("Completed stage.fetch_literature for session %s", sid)
 
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
