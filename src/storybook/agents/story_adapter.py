@@ -56,6 +56,16 @@ TEXT RULES (applies to verso_text and recto_text)
 - ONLY the narrative prose, dialogue, or poetry a child reads. No stage directions,
   illustration notes, asides to the illustrator, or hidden-object hints.
 - Must read naturally as printed book text with no evidence of production instructions.
+- NEVER DUPLICATE TEXT across verso and recto pages on the same spread. Each paragraph
+  or stanza of story content belongs on ONE page only (either verso_text OR recto_text, never both).
+- PAGE ALLOCATION & IMAGE SPEC: If `config.image_spec` or `config.custom_instructions`
+  designates one side for illustrations (e.g. a "left-image / right-text" layout or full-page
+  illustrations on verso), the illustration page must have its text field set to null
+  (`verso_text: null` for left-image), and story text must appear exclusively on the opposite page.
+- STRICT `config.text_spec` ENFORCEMENT: Any constraints in `config.text_spec` (e.g. sentence limits
+  such as "short paragraphs of two to three rhythmic sentences", poetic meter, rhyme scheme, line counts)
+  are MANDATORY. Count your sentences on every single page! A spread with 4 or 5 sentences when 2-3
+  are requested will cause immediate validation rejection.
 - If `text_spec` requires a specific poetic form, every line must conform to it exactly.
 - You may use **word** for bold and *word* for italic when emphasis genuinely serves the
   text (a shout, a title, a key word). Use sparingly. These will be rendered as HTML
@@ -201,6 +211,15 @@ read aloud at bedtime. Apply these rules to every non-null verso_text / recto_te
     pass. Treat it as a scaffold. Keep its spread layout and pacing; rewrite its
     prose for voice, sparkle, and bible adherence. Do not re-shuffle the
     structure unless validation feedback explicitly asks for it.
+
+11. **Zero-Tolerance Structural Compliance**:
+    - **No Duplicated Text**: Never duplicate story text across facing verso and recto pages.
+    - **Respect Image vs. Text Sides**: In layouts with designated illustration pages (e.g.
+      "left-image / right-text"), keep the illustration side `null` (`verso_text: null` for left-image).
+      Do not typeset text on top of the dedicated illustration page.
+    - **Strict Sentence Counts**: If `config.text_spec` prescribes sentence limits (such as
+      "two to three rhythmic sentences"), count the sentences in every single `recto_text` and
+      `verso_text`. Ensure NO page exceeds or violates the limit.
 """
 
 
