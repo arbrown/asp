@@ -33,7 +33,12 @@ _ASPECT_RATIO_GUIDANCE: dict[str, str] = {
 }
 
 
-def generate_image(prompt: str, aspect_ratio: str = "1:1", attempt: int | None = None) -> bytes:
+def generate_image(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    attempt: int | None = None,
+    reference_image: bytes | None = None,
+) -> bytes:
     """Generate an illustration; wraps the call in an OpenTelemetry span with GenAI conventions."""
     from storybook.tracing import (
         GEN_AI_OPERATION_NAME,
@@ -45,6 +50,7 @@ def generate_image(prompt: str, aspect_ratio: str = "1:1", attempt: int | None =
     span_attrs: dict[str, Any] = {
         "image.aspect_ratio": aspect_ratio,
         "image.model": settings.model_image,
+        "image.has_reference": reference_image is not None,
         GEN_AI_SYSTEM: "gemini",
         GEN_AI_REQUEST_MODEL: settings.model_image,
         GEN_AI_OPERATION_NAME: "generate_content",
@@ -57,20 +63,31 @@ def generate_image(prompt: str, aspect_ratio: str = "1:1", attempt: int | None =
         model=settings.model_image,
         **span_attrs,
     ):
-        return _generate_image(prompt, aspect_ratio)
+        return _generate_image(prompt, aspect_ratio, reference_image=reference_image)
 
 
-def _generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
+def _generate_image(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    reference_image: bytes | None = None,
+) -> bytes:
     """Generate a single illustration using Nano Banana 2."""
     from storybook.tracing import set_span_token_usage
 
     guidance = _ASPECT_RATIO_GUIDANCE.get(aspect_ratio, "")
     full_prompt = f"[{guidance}] {prompt}" if guidance else prompt
 
+    contents: list[Any] = []
+    if reference_image:
+        contents.append(
+            types.Part(inline_data=types.Blob(mime_type="image/png", data=reference_image))
+        )
+    contents.append(full_prompt)
+
     client = _client()
     response = client.models.generate_content(
         model=settings.model_image,
-        contents=full_prompt,
+        contents=contents if reference_image else full_prompt,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
         ),

@@ -21,7 +21,7 @@ class TestLuckyAndShuffle(unittest.TestCase):
         self.assertIn("CRITICAL EXCLUSIONS", prompt1)
         self.assertIn("CREATIVE CATALYSTS FOR THIS RUN", prompt1)
         self.assertIn("Rudyard Kipling", prompt1)
-        self.assertIn("Soviet constructivism", prompt1)
+        self.assertIn("Soviet constructivist", prompt1)
 
         # Check that seeds from our catalogs are present
         has_style = any(style in prompt1 for style in _ART_STYLE_SEEDS)

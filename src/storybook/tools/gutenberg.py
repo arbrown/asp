@@ -314,19 +314,13 @@ def fetch_gutenberg_url(url: str) -> str:
         "gutenberg.fetch",
         attributes={"gutenberg.url": url, "gutenberg.book_id": book_id},
     ) as span:
-        # Resolve ebook page URLs to the raw text file
+        # Resolve ebook page URLs to the raw text file directly
         ebook_match = re.search(r"gutenberg\.org/ebooks/(\d+)", url)
         if ebook_match:
             book_id = ebook_match.group(1)
             if span is not None and hasattr(span, "set_attribute"):
                 span.set_attribute("gutenberg.book_id", book_id)
-            meta = _get_with_retries(f"{_GUTENBERG_SEARCH}{book_id}/", timeout=30).json()
-            formats = meta.get("formats", {})
-            url = (
-                formats.get("text/plain; charset=utf-8")
-                or formats.get("text/plain")
-                or url
-            )
+            url = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
             if span is not None and hasattr(span, "set_attribute"):
                 span.set_attribute("gutenberg.url", url)
 

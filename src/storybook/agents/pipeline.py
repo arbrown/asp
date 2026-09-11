@@ -1251,10 +1251,18 @@ async def _generate_with_retries(
             spread_number=spread_number,
             image_index=image_index,
         ) as retry_span:
+            style_ref: bytes | None = None
+            if not is_ref_image:
+                await ref_ready.wait()
+                style_ref = ref_image[0] if ref_image else None
+
             try:
                 async with image_sem:
                     img_bytes = await asyncio.to_thread(
-                        generate_image, current_prompt, illustration_entry.aspect_ratio
+                        generate_image,
+                        current_prompt,
+                        illustration_entry.aspect_ratio,
+                        reference_image=style_ref,
                     )
             except (ImageContentPolicyError, ImageTokenLimitError) as exc:
                 is_policy = isinstance(exc, ImageContentPolicyError)
@@ -1283,11 +1291,6 @@ async def _generate_with_retries(
                     )
                     return _placeholder_image(f"Spread {spread_number}")
                 continue
-
-            style_ref: bytes | None = None
-            if not is_ref_image:
-                await ref_ready.wait()
-                style_ref = ref_image[0] if ref_image else None
 
             prev_img: bytes | None = completed_spread_images.get(spread_number - 1)
 

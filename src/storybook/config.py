@@ -28,10 +28,10 @@ class Settings(BaseSettings):
     text_two_pass: bool = True
 
     # Parallel image generation — max simultaneous generate_image() calls
-    image_concurrency: int = 3
+    image_concurrency: int = 5
 
     # Max simultaneous LLM calls (prompt generation + validation combined)
-    llm_concurrency: int = 3
+    llm_concurrency: int = 6
 
     # rqlite database URL — defaults to the k8s ClusterIP service name
     rqlite_url: str = "http://rqlite:4001"
