@@ -452,3 +452,30 @@ async def test_list_sessions_overlays_active_in_memory():
             assert active.progress_pct == 35
     finally:
         _sessions.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_fine_grained_429_retry():
+    """Verify that Gemini.generate_content_async retries on 429 RESOURCE_EXHAUSTED."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from google.adk.models.google_llm import Gemini
+
+    call_count = 0
+
+    async def mock_gen(self, req, stream=False):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+        yield "success-item"
+
+    with patch("storybook.agents.pipeline._original_generate_content_async", mock_gen), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        g = Gemini(model="gemini-3.5-flash")
+        items = []
+        async for item in g.generate_content_async(MagicMock(model="gemini-3.5-flash")):
+            items.append(item)
+
+        assert items == ["success-item"]
+        assert call_count == 3
+        assert mock_sleep.call_count == 2

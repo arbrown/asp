@@ -23,8 +23,10 @@ import json
 import logging
 import math
 import re
+from typing import Any
 
 from google.adk.agents import LlmAgent, LoopAgent
+from google.adk.models.google_llm import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -172,6 +174,46 @@ def _strip_json_fence(text: str) -> str:
 
 
 # ── Runner helpers ────────────────────────────────────────────────────────────
+
+_original_generate_content_async = Gemini.generate_content_async
+
+
+async def _retryable_generate_content_async(
+    self: Gemini, llm_request: Any, stream: bool = False
+) -> Any:
+    """Wrap Gemini.generate_content_async with fine-grained 429 retry.
+
+    Retries transient 429 RESOURCE_EXHAUSTED errors at the individual LLM call
+    level with exponential backoff. This prevents an entire LoopAgent (e.g.
+    craft_adapt_validate) or multi-step workflow from aborting and restarting
+    from scratch when a single validation or generation call hits rate limits.
+    """
+    max_retries = 5
+    for attempt in range(max_retries):
+        yielded = False
+        try:
+            async for item in _original_generate_content_async(self, llm_request, stream=stream):
+                yielded = True
+                yield item
+            return
+        except Exception as exc:
+            msg = str(exc)
+            if not yielded and ("RESOURCE_EXHAUSTED" in msg or "429" in msg) and attempt < max_retries - 1:
+                wait = 5 * (2 ** attempt)
+                log.warning(
+                    "429 RESOURCE_EXHAUSTED on model %s; retrying LLM call in %ds (attempt %d/%d)",
+                    getattr(llm_request, "model", "model"),
+                    wait,
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+
+Gemini.generate_content_async = _retryable_generate_content_async  # type: ignore[assignment]
+
 
 def _make_runner(agent: LlmAgent | LoopAgent) -> Runner:
     return Runner(
