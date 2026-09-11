@@ -18,6 +18,7 @@ Progress events are written to an asyncio.Queue for SSE streaming.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -898,24 +899,37 @@ async def _run_pipeline(
                     "recto_text": spread_content.recto_text,
                     "spread_number": spread_number,
                 })
+                verifier_sid = f"{sid}-htmlverify-{spread_number}-{verify_attempt}"
                 async with llm_sem:
                     verify_result = await _run_agent(
                         verifier_runner,
-                        f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
+                        verifier_sid,
                         verify_input,
                         subject_image=primary_img_bytes,
                         reference_image=secondary_img_bytes,
                     )
-                if "approved" in verify_result.lower():
+                vsession = None
+                if hasattr(verifier_runner, "session_service") and hasattr(verifier_runner.session_service, "get_session"):
+                    session_coro = verifier_runner.session_service.get_session(
+                        app_name=verifier_runner.app_name,
+                        user_id="pipeline",
+                        session_id=verifier_sid,
+                    )
+                    if inspect.isawaitable(session_coro):
+                        vsession = await session_coro
+                    elif hasattr(session_coro, "state"):
+                        vsession = session_coro
+                approved = False
+                if vsession and "layout_approved" in vsession.state:
+                    approved = bool(vsession.state["layout_approved"])
+                elif "approved" in verify_result.lower():
+                    approved = True
+
+                if approved:
                     break
                 log.warning(
                     "Spread HTML layout verification failed for spread %d (attempt %d): %s",
                     spread_number, verify_attempt, verify_result[:200],
-                )
-                vsession = await verifier_runner.session_service.get_session(
-                    app_name=verifier_runner.app_name,
-                    user_id="pipeline",
-                    session_id=f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
                 )
                 if vsession:
                     new_overrides = vsession.state.get("layout_css_overrides") or {}
@@ -1246,6 +1260,7 @@ async def _generate_with_retries(
                 "character_bible": bible_dict,
                 "spread_number": spread_number,
             })
+            val_sid = f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}"
             with check_image_validation(
                 attempt=attempt,
                 max_attempts=settings.image_max_retries + 1,
@@ -1255,16 +1270,36 @@ async def _generate_with_retries(
                 async with llm_sem:
                     result = await _run_agent(
                         validator_runner,
-                        f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
+                        val_sid,
                         validate_input,
                         subject_image=img_bytes,
                         reference_image=style_ref,
                         prev_spread_image=prev_img,
                     )
 
-                passed = "approved" in result.lower()
-                score = 1.0 if passed else 0.0
-                reasons = [] if passed else [result.strip()]
+                vsession = None
+                if hasattr(validator_runner, "session_service") and hasattr(validator_runner.session_service, "get_session"):
+                    session_coro = validator_runner.session_service.get_session(
+                        app_name=validator_runner.app_name,
+                        user_id="pipeline",
+                        session_id=val_sid,
+                    )
+                    if inspect.isawaitable(session_coro):
+                        vsession = await session_coro
+                    elif hasattr(session_coro, "state"):
+                        vsession = session_coro
+                if vsession and "validation.passed" in vsession.state:
+                    passed = bool(vsession.state["validation.passed"])
+                    score = float(vsession.state.get("validation.score", 1.0 if passed else 0.0))
+                    reasons = vsession.state.get("validation.reasons") or ([] if passed else [result.strip()])
+                    revised_prompt = vsession.state.get("revised_image_prompt")
+                    if revised_prompt and not passed:
+                        current_prompt = revised_prompt
+                else:
+                    passed = "approved" in result.lower()
+                    score = 1.0 if passed else 0.0
+                    reasons = [] if passed else [result.strip()]
+
                 record_validation_result(
                     val_span,
                     passed=passed,
