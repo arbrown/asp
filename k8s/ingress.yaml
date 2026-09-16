@@ -8,6 +8,7 @@ metadata:
     kubernetes.io/ingress.allow-http: "true"
     kubernetes.io/ingress.global-static-ip-name: "storybook-ip"
     networking.gke.io/managed-certificates: "storybook-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "storybook-frontend-config"
 spec:
   rules:
     - http:

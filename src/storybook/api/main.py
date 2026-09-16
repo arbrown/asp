@@ -9,9 +9,9 @@ from storybook.config import settings
 from storybook.db import store
 from storybook.models import PipelineState, SessionConfig
 from storybook.tools import gcs
-from storybook.tracing import init_tracing
+from storybook.tracing import init_tracing, setup_logging
 
-logging.basicConfig(level=logging.INFO)
+setup_logging(settings.gcp_project_id)
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ async def _load_from_gcs_and_backfill() -> int:
 
 @app.on_event("startup")
 async def startup() -> None:
+    setup_logging(settings.gcp_project_id)
     # Initialize rqlite schema
     db_ready = False
     try:

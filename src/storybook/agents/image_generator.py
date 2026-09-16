@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from google import genai
 from google.genai import types
 
@@ -31,18 +33,37 @@ _ASPECT_RATIO_GUIDANCE: dict[str, str] = {
 }
 
 
-def generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
-    """Generate an illustration; wraps the call in a Cloud Trace span."""
-    from storybook.tracing import get_tracer
-    with get_tracer().start_as_current_span(
+def generate_image(prompt: str, aspect_ratio: str = "1:1", attempt: int | None = None) -> bytes:
+    """Generate an illustration; wraps the call in an OpenTelemetry span with GenAI conventions."""
+    from storybook.tracing import (
+        GEN_AI_OPERATION_NAME,
+        GEN_AI_REQUEST_MODEL,
+        GEN_AI_SYSTEM,
+        trace_agent_call,
+    )
+
+    span_attrs: dict[str, Any] = {
+        "image.aspect_ratio": aspect_ratio,
+        "image.model": settings.model_image,
+        GEN_AI_SYSTEM: "gemini",
+        GEN_AI_REQUEST_MODEL: settings.model_image,
+        GEN_AI_OPERATION_NAME: "generate_content",
+    }
+    if attempt is not None:
+        span_attrs["retry.attempt"] = attempt
+
+    with trace_agent_call(
         "image.generate",
-        attributes={"image.aspect_ratio": aspect_ratio, "image.model": settings.model_image},
+        model=settings.model_image,
+        **span_attrs,
     ):
         return _generate_image(prompt, aspect_ratio)
 
 
 def _generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
     """Generate a single illustration using Nano Banana 2."""
+    from storybook.tracing import set_span_token_usage
+
     guidance = _ASPECT_RATIO_GUIDANCE.get(aspect_ratio, "")
     full_prompt = f"[{guidance}] {prompt}" if guidance else prompt
 
@@ -55,6 +76,15 @@ def _generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
         ),
     )
 
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        prompt_tokens = getattr(usage, "prompt_token_count", None)
+        completion_tokens = getattr(usage, "candidates_token_count", None)
+        set_span_token_usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
     candidates = response.candidates or []
     if candidates:
         candidate = candidates[0]
@@ -62,8 +92,10 @@ def _generate_image(prompt: str, aspect_ratio: str = "1:1") -> bytes:
         if finish_reason is not None:
             reason_str = str(finish_reason)
             if reason_str in (
-                "FinishReason.NO_IMAGE", "NO_IMAGE",
-                "FinishReason.IMAGE_PROHIBITED_CONTENT", "IMAGE_PROHIBITED_CONTENT",
+                "FinishReason.NO_IMAGE",
+                "NO_IMAGE",
+                "FinishReason.IMAGE_PROHIBITED_CONTENT",
+                "IMAGE_PROHIBITED_CONTENT",
             ):
                 raise ImageContentPolicyError(f"Image model refused (finish_reason={reason_str})")
             if reason_str in ("FinishReason.MAX_TOKENS", "MAX_TOKENS"):

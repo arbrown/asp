@@ -1,9 +1,15 @@
 """Image Validator — multimodal check of a generated illustration."""
 
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Any
+
 from google.adk.agents import LlmAgent
 from google.adk.tools.tool_context import ToolContext
 
 from storybook.config import settings
+from storybook.tracing import trace_retry_attempt
 
 INSTRUCTION = """You are a quality control reviewer for children's storybook illustrations.
 
@@ -60,6 +66,8 @@ Keep the revised prompt close to the original — targeted corrections, not a fu
 def approve_image(tool_context: ToolContext) -> dict:
     """Signal that the generated image has passed all validation checks."""
     tool_context.actions.escalate = True
+    tool_context.state["validation.passed"] = True
+    tool_context.state["validation.score"] = 1.0
     return {"status": "approved"}
 
 
@@ -71,7 +79,58 @@ def reject_image(revised_prompt: str, tool_context: ToolContext) -> dict:
         revised_prompt: The corrected image generation prompt to use on retry.
     """
     tool_context.state["revised_image_prompt"] = revised_prompt
+    tool_context.state["validation.passed"] = False
+    tool_context.state["validation.score"] = 0.0
+    tool_context.state["validation.reasons"] = [revised_prompt]
     return {"status": "rejected", "revised_prompt": revised_prompt}
+
+
+@contextmanager
+def check(
+    attempt: int = 1,
+    max_attempts: int | None = None,
+    score: float | None = None,
+    passed: bool | None = None,
+    reasons: list[str] | str | None = None,
+    **attributes: Any,
+):
+    """Context manager to trace an image validation check as an attempt-level child span."""
+    span_attrs: dict[str, Any] = {
+        "validation.attempt": attempt,
+    }
+    if passed is not None:
+        span_attrs["validation.passed"] = passed
+    if score is not None:
+        span_attrs["validation.score"] = score
+    if reasons is not None:
+        span_attrs["validation.reasons"] = [reasons] if isinstance(reasons, str) else reasons
+    span_attrs.update(attributes)
+
+    with trace_retry_attempt(
+        "image_validator.check",
+        attempt=attempt,
+        max_attempts=max_attempts,
+        **span_attrs,
+    ) as span:
+        yield span
+
+
+def record_validation_result(
+    span: Any,
+    passed: bool,
+    score: float | None = None,
+    attempt: int = 1,
+    reasons: list[str] | str | None = None,
+) -> None:
+    """Record validation outcome attributes on an active validation span."""
+    if score is None:
+        score = 1.0 if passed else 0.0
+    span.set_attribute("validation.passed", passed)
+    span.set_attribute("validation.score", score)
+    span.set_attribute("validation.attempt", attempt)
+    if reasons is not None:
+        formatted_reasons = [reasons] if isinstance(reasons, str) else reasons
+        span.set_attribute("validation.reasons", formatted_reasons)
 
 
 image_validator = LlmAgent(
