@@ -8,6 +8,8 @@ venv/
 dist/
 build/
 .eggs/
+node_modules/
+*.tsbuildinfo
 
 # Environment / secrets
 .env

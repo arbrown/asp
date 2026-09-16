@@ -15,7 +15,12 @@ from storybook.config import settings
 # ── Shared structural rules ───────────────────────────────────────────────────
 
 BASE_INSTRUCTION = """You will receive a JSON object containing:
-- `source_text`: the original public-domain work (or one chunk of it)
+- `source_text`: the original public-domain work (or one chunk of it).
+  CRITICAL: If `source_text` is empty, or if the exact text was not found on Project
+  Gutenberg, adapt the story directly from your deep model knowledge of the requested
+  classic work, title, and author in `config` (e.g. `config.source.title` / `config.title`).
+  Faithfully recreate the beloved narrative arc, characters, and key scenes without relying
+  on a downloaded source text.
 - `config`: session configuration including:
   - `target_age`: age range string ("4-5", "6-8", "9-12")
   - `text_spec`: optional poetic/format constraint
@@ -56,6 +61,16 @@ TEXT RULES (applies to verso_text and recto_text)
 - ONLY the narrative prose, dialogue, or poetry a child reads. No stage directions,
   illustration notes, asides to the illustrator, or hidden-object hints.
 - Must read naturally as printed book text with no evidence of production instructions.
+- NEVER DUPLICATE TEXT across verso and recto pages on the same spread. Each paragraph
+  or stanza of story content belongs on ONE page only (either verso_text OR recto_text, never both).
+- PAGE ALLOCATION & IMAGE SPEC: If `config.image_spec` or `config.custom_instructions`
+  designates one side for illustrations (e.g. a "left-image / right-text" layout or full-page
+  illustrations on verso), the illustration page must have its text field set to null
+  (`verso_text: null` for left-image), and story text must appear exclusively on the opposite page.
+- STRICT `config.text_spec` ENFORCEMENT: Any constraints in `config.text_spec` (e.g. sentence limits
+  such as "short paragraphs of two to three rhythmic sentences", poetic meter, rhyme scheme, line counts)
+  are MANDATORY. Count your sentences on every single page! A spread with 4 or 5 sentences when 2-3
+  are requested will cause immediate validation rejection.
 - If `text_spec` requires a specific poetic form, every line must conform to it exactly.
 - You may use **word** for bold and *word* for italic when emphasis genuinely serves the
   text (a shout, a title, a key word). Use sparingly. These will be rendered as HTML
@@ -64,7 +79,9 @@ TEXT RULES (applies to verso_text and recto_text)
 Age guidelines for text (the active bands; legacy 6-8 ≈ 6-7, 9-12 ≈ 10-12):
 - 2-3:   Toddler / board book. ≤8 words per page. Naming, sound words, single
          actions ("The cat sleeps."). Rhythm and repetition above all.
-- 4-5:   Pre-K. Very short sentences. Concrete, simple language. Rhyme welcome.
+- 4-5:   Pre-K. Simple, rhythmic sentences with natural spoken cadence. Concrete
+         language, refrain, and varied sentence openings (avoid starting every
+         sentence with 'He', 'She', or the character's name). Rhyme welcome.
 - 6-7:   K-1 / early reader. Simple sentences with light dialogue. A small
          decodable vocabulary, occasional surprising word.
 - 8-9:   Grade 2-3. Compound sentences. Descriptive language, some metaphor.
@@ -201,6 +218,15 @@ read aloud at bedtime. Apply these rules to every non-null verso_text / recto_te
     pass. Treat it as a scaffold. Keep its spread layout and pacing; rewrite its
     prose for voice, sparkle, and bible adherence. Do not re-shuffle the
     structure unless validation feedback explicitly asks for it.
+
+11. **Zero-Tolerance Structural Compliance**:
+    - **No Duplicated Text**: Never duplicate story text across facing verso and recto pages.
+    - **Respect Image vs. Text Sides**: In layouts with designated illustration pages (e.g.
+      "left-image / right-text"), keep the illustration side `null` (`verso_text: null` for left-image).
+      Do not typeset text on top of the dedicated illustration page.
+    - **Strict Sentence Counts**: If `config.text_spec` prescribes sentence limits (such as
+      "two to three rhythmic sentences"), count the sentences in every single `recto_text` and
+      `verso_text`. Ensure NO page exceeds or violates the limit.
 """
 
 

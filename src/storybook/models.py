@@ -141,3 +141,4 @@ class PipelineState(BaseModel):
     trace_url: str = ""
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    adapted_from_source: bool = True

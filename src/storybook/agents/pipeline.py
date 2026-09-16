@@ -18,12 +18,15 @@ Progress events are written to an asyncio.Queue for SSE streaming.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
 import re
+from typing import Any
 
 from google.adk.agents import LlmAgent, LoopAgent
+from google.adk.models.google_llm import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -68,7 +71,11 @@ from storybook.models import (
     SpreadPlan,
 )
 from storybook.tools import gcs
-from storybook.tools.gutenberg import fetch_gutenberg_url, search_gutenberg
+from storybook.tools.gutenberg import (
+    fetch_gutenberg_url,
+    find_matching_gutenberg_candidate,
+    search_gutenberg,
+)
 from storybook.tracing import (
     SpanContextManager,
     get_tracer,
@@ -171,6 +178,46 @@ def _strip_json_fence(text: str) -> str:
 
 
 # ── Runner helpers ────────────────────────────────────────────────────────────
+
+_original_generate_content_async = Gemini.generate_content_async
+
+
+async def _retryable_generate_content_async(
+    self: Gemini, llm_request: Any, stream: bool = False
+) -> Any:
+    """Wrap Gemini.generate_content_async with fine-grained 429 retry.
+
+    Retries transient 429 RESOURCE_EXHAUSTED errors at the individual LLM call
+    level with exponential backoff. This prevents an entire LoopAgent (e.g.
+    craft_adapt_validate) or multi-step workflow from aborting and restarting
+    from scratch when a single validation or generation call hits rate limits.
+    """
+    max_retries = 5
+    for attempt in range(max_retries):
+        yielded = False
+        try:
+            async for item in _original_generate_content_async(self, llm_request, stream=stream):
+                yielded = True
+                yield item
+            return
+        except Exception as exc:
+            msg = str(exc)
+            if not yielded and ("RESOURCE_EXHAUSTED" in msg or "429" in msg) and attempt < max_retries - 1:
+                wait = 5 * (2 ** attempt)
+                log.warning(
+                    "429 RESOURCE_EXHAUSTED on model %s; retrying LLM call in %ds (attempt %d/%d)",
+                    getattr(llm_request, "model", "model"),
+                    wait,
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+
+Gemini.generate_content_async = _retryable_generate_content_async  # type: ignore[assignment]
+
 
 def _make_runner(agent: LlmAgent | LoopAgent) -> Runner:
     return Runner(
@@ -290,9 +337,12 @@ async def _seed_bible_for_chunk(
     seed_input: dict = {
         "source_text": chunk["text"],
         "config": {
+            "title": cfg.source.title,
+            "author": cfg.source.author,
             "image_spec": cfg.image_spec,
             "target_age": cfg.target_age,
             "text_spec": cfg.text_spec,
+            "custom_instructions": cfg.custom_instructions,
         },
     }
     if chunk["chunk_context"]:
@@ -318,6 +368,8 @@ async def _draft_chunk(
     chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
     adapter_config: dict = {
         **cfg.model_dump(),
+        "title": cfg.source.title,
+        "author": cfg.source.author,
         "spread_count": chunk["spread_count"],
         "spreads_meta": chunk["spreads_meta"],
     }
@@ -364,6 +416,8 @@ async def _craft_chunk(
     chunk_sid = sid if n_chunks == 1 else f"{sid}-chunk{chunk_idx}"
     adapter_config: dict = {
         **cfg.model_dump(),
+        "title": cfg.source.title,
+        "author": cfg.source.author,
         "spread_count": chunk["spread_count"],
         "spreads_meta": chunk["spreads_meta"],
     }
@@ -443,6 +497,9 @@ async def _run_pipeline(
 ) -> PipelineState:
 
     async def emit(stage: str, pct: int, **extra):
+        if stage != "image_retry":
+            state.current_stage = stage
+        state.progress_pct = pct
         await progress_queue.put({"stage": stage, "pct": pct, **extra})
 
     sid = state.session_id
@@ -492,6 +549,7 @@ async def _run_pipeline(
                 state.source_text = await asyncio.to_thread(
                     fetch_gutenberg_url, cfg.source.gutenberg_url
                 )
+                state.adapted_from_source = True
             else:
                 candidates = [
                     cfg.source.title,
@@ -510,43 +568,65 @@ async def _run_pipeline(
                     )
                     if results:
                         break
-                if not results:
-                    raise RuntimeError(
-                        f"No Gutenberg results found for: "
-                        f"{cfg.source.title!r} / {cfg.source.author!r}"
+
+                matched_candidate = (
+                    find_matching_gutenberg_candidate(cfg.source.title, cfg.source.author, results)
+                    if results
+                    else None
+                )
+
+                if matched_candidate:
+                    log.info(
+                        "Found matching Gutenberg candidate: %r (%s)",
+                        matched_candidate.get("title"),
+                        matched_candidate["download_url"],
                     )
+                    state.source_text = await asyncio.to_thread(
+                        fetch_gutenberg_url, matched_candidate["download_url"]
+                    )
+                    state.adapted_from_source = True
+                else:
+                    log.warning(
+                        "Exact text for %r by %r not found on Project Gutenberg; adapting story directly from model weights.",
+                        cfg.source.title,
+                        cfg.source.author,
+                    )
+                    state.source_text = ""
+                    state.adapted_from_source = False
+                    await emit(
+                        "fetching",
+                        10,
+                        message="Exact text not found on Gutenberg; adapting directly from model weights",
+                        adapted_from_source=False,
+                    )
+
+            if state.adapted_from_source:
                 log.info(
-                    "Downloading selected candidate: %r (%s)",
-                    results[0].get("title"),
-                    results[0]["download_url"],
-                )
-                state.source_text = await asyncio.to_thread(
-                    fetch_gutenberg_url, results[0]["download_url"]
+                    "Literature fetch complete for session %s: downloaded %d chars (%d words)",
+                    sid,
+                    len(state.source_text),
+                    len(state.source_text.split()),
                 )
 
-            log.info(
-                "Literature fetch complete for session %s: downloaded %d chars (%d words)",
-                sid,
-                len(state.source_text),
-                len(state.source_text.split()),
-            )
+                with SpanContextManager(
+                    "gcs.write_source_text",
+                    attributes={
+                        "gcs.bucket": settings.gcs_artifacts_bucket,
+                        "gcs.path": f"sessions/{sid}/original/source_text.txt",
+                        "text.length_chars": len(state.source_text),
+                        "text.length_words": len(state.source_text.split()),
+                    },
+                ):
+                    gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
+                log.info(
+                    "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
+                    settings.gcs_artifacts_bucket,
+                    sid,
+                )
+                await emit("fetching", 10, message="Source text fetched", adapted_from_source=True)
+            else:
+                log.info("Proceeding to story adaptation without source text for session %s", sid)
 
-            with SpanContextManager(
-                "gcs.write_source_text",
-                attributes={
-                    "gcs.bucket": settings.gcs_artifacts_bucket,
-                    "gcs.path": f"sessions/{sid}/original/source_text.txt",
-                    "text.length_chars": len(state.source_text),
-                    "text.length_words": len(state.source_text.split()),
-                },
-            ):
-                gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
-            log.info(
-                "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
-                settings.gcs_artifacts_bucket,
-                sid,
-            )
-            await emit("fetching", 10, message="Source text fetched")
             log.info("Completed stage.fetch_literature for session %s", sid)
 
         # ── 2. Adapt + validate text (per-spread output) ──────────────────────
@@ -895,24 +975,37 @@ async def _run_pipeline(
                     "recto_text": spread_content.recto_text,
                     "spread_number": spread_number,
                 })
+                verifier_sid = f"{sid}-htmlverify-{spread_number}-{verify_attempt}"
                 async with llm_sem:
                     verify_result = await _run_agent(
                         verifier_runner,
-                        f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
+                        verifier_sid,
                         verify_input,
                         subject_image=primary_img_bytes,
                         reference_image=secondary_img_bytes,
                     )
-                if "approved" in verify_result.lower():
+                vsession = None
+                if hasattr(verifier_runner, "session_service") and hasattr(verifier_runner.session_service, "get_session"):
+                    session_coro = verifier_runner.session_service.get_session(
+                        app_name=verifier_runner.app_name,
+                        user_id="pipeline",
+                        session_id=verifier_sid,
+                    )
+                    if inspect.isawaitable(session_coro):
+                        vsession = await session_coro
+                    elif hasattr(session_coro, "state"):
+                        vsession = session_coro
+                approved = False
+                if vsession and "layout_approved" in vsession.state:
+                    approved = bool(vsession.state["layout_approved"])
+                elif "approved" in verify_result.lower():
+                    approved = True
+
+                if approved:
                     break
                 log.warning(
                     "Spread HTML layout verification failed for spread %d (attempt %d): %s",
                     spread_number, verify_attempt, verify_result[:200],
-                )
-                vsession = await verifier_runner.session_service.get_session(
-                    app_name=verifier_runner.app_name,
-                    user_id="pipeline",
-                    session_id=f"{sid}-htmlverify-{spread_number}-{verify_attempt}",
                 )
                 if vsession:
                     new_overrides = vsession.state.get("layout_css_overrides") or {}
@@ -1192,10 +1285,18 @@ async def _generate_with_retries(
             spread_number=spread_number,
             image_index=image_index,
         ) as retry_span:
+            style_ref: bytes | None = None
+            if not is_ref_image:
+                await ref_ready.wait()
+                style_ref = ref_image[0] if ref_image else None
+
             try:
                 async with image_sem:
                     img_bytes = await asyncio.to_thread(
-                        generate_image, current_prompt, illustration_entry.aspect_ratio
+                        generate_image,
+                        current_prompt,
+                        illustration_entry.aspect_ratio,
+                        reference_image=style_ref,
                     )
             except (ImageContentPolicyError, ImageTokenLimitError) as exc:
                 is_policy = isinstance(exc, ImageContentPolicyError)
@@ -1225,11 +1326,6 @@ async def _generate_with_retries(
                     return _placeholder_image(f"Spread {spread_number}")
                 continue
 
-            style_ref: bytes | None = None
-            if not is_ref_image:
-                await ref_ready.wait()
-                style_ref = ref_image[0] if ref_image else None
-
             prev_img: bytes | None = completed_spread_images.get(spread_number - 1)
 
             validate_input = json.dumps({
@@ -1243,6 +1339,7 @@ async def _generate_with_retries(
                 "character_bible": bible_dict,
                 "spread_number": spread_number,
             })
+            val_sid = f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}"
             with check_image_validation(
                 attempt=attempt,
                 max_attempts=settings.image_max_retries + 1,
@@ -1252,16 +1349,36 @@ async def _generate_with_retries(
                 async with llm_sem:
                     result = await _run_agent(
                         validator_runner,
-                        f"{session_id}-imgval-{spread_number}-{image_index}-{attempt}",
+                        val_sid,
                         validate_input,
                         subject_image=img_bytes,
                         reference_image=style_ref,
                         prev_spread_image=prev_img,
                     )
 
-                passed = "approved" in result.lower()
-                score = 1.0 if passed else 0.0
-                reasons = [] if passed else [result.strip()]
+                vsession = None
+                if hasattr(validator_runner, "session_service") and hasattr(validator_runner.session_service, "get_session"):
+                    session_coro = validator_runner.session_service.get_session(
+                        app_name=validator_runner.app_name,
+                        user_id="pipeline",
+                        session_id=val_sid,
+                    )
+                    if inspect.isawaitable(session_coro):
+                        vsession = await session_coro
+                    elif hasattr(session_coro, "state"):
+                        vsession = session_coro
+                if vsession and "validation.passed" in vsession.state:
+                    passed = bool(vsession.state["validation.passed"])
+                    score = float(vsession.state.get("validation.score", 1.0 if passed else 0.0))
+                    reasons = vsession.state.get("validation.reasons") or ([] if passed else [result.strip()])
+                    revised_prompt = vsession.state.get("revised_image_prompt")
+                    if revised_prompt and not passed:
+                        current_prompt = revised_prompt
+                else:
+                    passed = "approved" in result.lower()
+                    score = 1.0 if passed else 0.0
+                    reasons = [] if passed else [result.strip()]
+
                 record_validation_result(
                     val_span,
                     passed=passed,

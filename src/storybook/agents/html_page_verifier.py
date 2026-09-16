@@ -108,6 +108,7 @@ After reading the HTML and images, your VERY NEXT action must be a call to eithe
 def approve_layout(tool_context: ToolContext) -> dict:
     """Signal that the spread HTML passes all layout checks."""
     tool_context.actions.escalate = True
+    tool_context.state["layout_approved"] = True
     return {"status": "approved"}
 
 
@@ -129,6 +130,7 @@ def reject_layout(
               text_color_hex: "#rrggbb" — exact text color to use (always include for legibility fixes)
               font_size_scale: float — multiply base font size (e.g. 1.2–1.5)
     """
+    tool_context.state["layout_approved"] = False
     tool_context.state["layout_feedback"] = feedback
     tool_context.state["layout_suggested_fix"] = suggested_fix
     tool_context.state["layout_css_overrides"] = css_overrides

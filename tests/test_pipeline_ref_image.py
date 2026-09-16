@@ -25,7 +25,7 @@ class TestPipelineRefImage(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch("storybook.agents.pipeline.generate_image", return_value=b"fake_image_bytes"),
+            patch("storybook.agents.pipeline.generate_image", return_value=b"fake_image_bytes") as mock_gen_image,
             patch("storybook.agents.pipeline._run_agent", new_callable=AsyncMock) as mock_run_agent,
             patch("storybook.agents.pipeline._make_runner", return_value=MagicMock()),
         ):
@@ -51,6 +51,56 @@ class TestPipelineRefImage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(img_bytes, b"fake_image_bytes")
             # Should have succeeded without ref_ready ever being set!
             self.assertFalse(ref_ready.is_set())
+            mock_gen_image.assert_called_once_with("test prompt", "16:9", reference_image=None)
+
+    async def test_generate_with_retries_session_state_approval(self):
+        ref_ready = asyncio.Event()
+        ref_image = []
+        progress_queue = asyncio.Queue()
+
+        spread_content = SpreadContent(
+            spread_number=1,
+            verso_text="text",
+            recto_text="text",
+        )
+        illustration_entry = IllustrationEntry(
+            image_index=0,
+            coverage="full",
+            aspect_ratio="16:9",
+            illustration_notes="notes",
+        )
+
+        mock_runner = MagicMock()
+        mock_session = MagicMock()
+        mock_session.state = {"validation.passed": True, "validation.score": 1.0}
+        mock_runner.session_service.get_session = AsyncMock(return_value=mock_session)
+
+        with (
+            patch("storybook.agents.pipeline.generate_image", return_value=b"fake_image_bytes"),
+            patch("storybook.agents.pipeline._run_agent", new_callable=AsyncMock) as mock_run_agent,
+            patch("storybook.agents.pipeline._make_runner", return_value=mock_runner),
+        ):
+            # Model response does NOT contain the word 'approved'
+            mock_run_agent.return_value = "The image passes all quality checks and matches the bible."
+
+            img_bytes = await _generate_with_retries(
+                session_id="test-session",
+                spread_number=1,
+                image_index=0,
+                image_prompt="test prompt",
+                spread_content=spread_content,
+                illustration_entry=illustration_entry,
+                bible_dict={},
+                image_sem=asyncio.Semaphore(2),
+                llm_sem=asyncio.Semaphore(2),
+                ref_ready=ref_ready,
+                ref_image=ref_image,
+                progress_queue=progress_queue,
+                completed_spread_images={},
+                is_ref_image=True,
+            )
+
+            self.assertEqual(img_bytes, b"fake_image_bytes")
 
     async def test_generate_with_retries_non_ref_waits_for_ref_ready(self):
         ref_ready = asyncio.Event()
@@ -70,7 +120,7 @@ class TestPipelineRefImage(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch("storybook.agents.pipeline.generate_image", return_value=b"fake_image_bytes_2"),
+            patch("storybook.agents.pipeline.generate_image", return_value=b"fake_image_bytes_2") as mock_gen_image,
             patch("storybook.agents.pipeline._run_agent", new_callable=AsyncMock) as mock_run_agent,
             patch("storybook.agents.pipeline._make_runner", return_value=MagicMock()),
         ):
@@ -98,6 +148,8 @@ class TestPipelineRefImage(unittest.IsolatedAsyncioTestCase):
             # Give it a moment to run and block on ref_ready.wait()
             await asyncio.sleep(0.01)
             self.assertFalse(task.done())
+            # Ensure generate_image has NOT been called yet while waiting for ref_ready
+            mock_gen_image.assert_not_called()
 
             # Now signal ref_ready
             ref_image.append(b"anchor_style_image")
@@ -105,6 +157,9 @@ class TestPipelineRefImage(unittest.IsolatedAsyncioTestCase):
 
             result = await asyncio.wait_for(task, timeout=1.0)
             self.assertEqual(result, b"fake_image_bytes_2")
+            mock_gen_image.assert_called_once_with(
+                "test prompt", "16:9", reference_image=b"anchor_style_image"
+            )
             # Verify reference_image was passed to validator
             _, kwargs = mock_run_agent.call_args
             self.assertEqual(kwargs.get("reference_image"), b"anchor_style_image")

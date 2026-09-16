@@ -425,3 +425,57 @@ def test_setup_logging():
 
     for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "storybook"):
         assert logging.getLogger(logger_name).propagate is True
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_overlays_active_in_memory():
+    """Verify that list_sessions_route includes active running sessions from _sessions with live progress."""
+    from unittest.mock import AsyncMock, patch
+    from storybook.models import PipelineState, SessionConfig, SourceConfig
+    from storybook.api.routes import _sessions, list_sessions_route
+
+    sid = "test-active-overlay"
+    state = PipelineState(
+        session_id=sid,
+        config=SessionConfig(source=SourceConfig(title="Test Book", author="Test Author")),
+        current_stage="adapting_text",
+        progress_pct=35,
+    )
+    _sessions[sid] = state
+    try:
+        with patch("storybook.api.routes.store.list_sessions", new_callable=AsyncMock) as mock_list:
+            mock_list.return_value = []
+            results = await list_sessions_route()
+            active = next((r for r in results if r.session_id == sid), None)
+            assert active is not None
+            assert active.current_stage == "adapting_text"
+            assert active.progress_pct == 35
+    finally:
+        _sessions.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_fine_grained_429_retry():
+    """Verify that Gemini.generate_content_async retries on 429 RESOURCE_EXHAUSTED."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from google.adk.models.google_llm import Gemini
+
+    call_count = 0
+
+    async def mock_gen(self, req, stream=False):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+        yield "success-item"
+
+    with patch("storybook.agents.pipeline._original_generate_content_async", mock_gen), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        g = Gemini(model="gemini-3.5-flash")
+        items = []
+        async for item in g.generate_content_async(MagicMock(model="gemini-3.5-flash")):
+            items.append(item)
+
+        assert items == ["success-item"]
+        assert call_count == 3
+        assert mock_sleep.call_count == 2

@@ -31,13 +31,18 @@ export default function ViewerPage() {
           {author && (
             <p className="text-sm text-sepia-600 mt-0.5">Adapted from {author}</p>
           )}
-          <p className="text-xs font-mono text-sepia-500 mt-1">{id}</p>
+          {session.adapted_from_source === false && (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 mt-2 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300">
+              <span>⚠️</span>
+              <span>Adapted from model weights (exact text not found on Gutenberg)</span>
+            </div>
+          )}
           {traceUrl && (
             <a
               href={traceUrl}
               target="_blank"
               rel="noreferrer"
-              className="text-xs text-sepia-400 hover:text-sepia-600 underline mt-0.5 inline-block"
+              className="text-xs text-sepia-400 hover:text-sepia-600 underline mt-0.5 inline-block block"
             >
               View trace
             </a>
