@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import grpc
 from google.protobuf import empty_pb2
@@ -270,6 +270,70 @@ class SubstrateClient:
     async def stop_actor(self, name: str, atespace: str = "asp") -> bool:
         """Stop and delete an active Substrate Actor."""
         return await asyncio.to_thread(self._stop_actor_sync, name, atespace)
+
+    def _get_actor_sync(self, name: str, atespace: str) -> Optional[dict]:
+        if not settings.substrate_enabled:
+            proc = self._local_procs.get(name)
+            if proc is None:
+                return None
+            rc = proc.poll()
+            return {
+                "name": name,
+                "atespace": atespace,
+                "state": "ACTOR_STATE_RUNNING" if rc is None else "ACTOR_STATE_CRASHED",
+                "crash_count": 0 if rc in (None, 0) else 1,
+                "last_crash_reason": "" if rc is None else f"exited with code {rc}",
+                "worker_pod": "local",
+            }
+
+        try:
+            with self._open_channel() as channel:
+                stub = ateapi_pb2_grpc.ControlStub(channel)
+                actor_ref = ateapi_pb2.ObjectRef(atespace=atespace, name=name)
+                actor = stub.GetActor(
+                    ateapi_pb2.GetActorRequest(actor=actor_ref),
+                    timeout=5.0,
+                )
+                return {
+                    "name": actor.metadata.name,
+                    "atespace": actor.metadata.atespace,
+                    "uid": actor.metadata.uid,
+                    "state": ateapi_pb2.ActorState.Name(actor.status.state),
+                    "crash_count": getattr(actor.status, "crash_count", 0),
+                    "last_crash_reason": getattr(actor.status, "last_crash_reason", ""),
+                    "worker_pod": (
+                        actor.status.worker_assignment.worker_pod
+                        if actor.status.HasField("worker_assignment")
+                        else ""
+                    ),
+                }
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.NOT_FOUND:
+                return None
+            log.warning("Failed to query Substrate actor %s/%s: %s", atespace, name, exc)
+            return {
+                "name": name,
+                "atespace": atespace,
+                "state": "ACTOR_STATE_UNKNOWN",
+            }
+        except Exception as exc:
+            log.warning("Substrate client error for %s/%s: %s", atespace, name, exc)
+            return {
+                "name": name,
+                "atespace": atespace,
+                "state": "ACTOR_STATE_UNKNOWN",
+            }
+
+    async def get_actor(self, name: str, atespace: str = "asp") -> Optional[dict]:
+        """Return actor status dict from Substrate, or None if not found."""
+        return await asyncio.to_thread(self._get_actor_sync, name, atespace)
+
+    async def is_actor_running(self, name: str, atespace: str = "asp") -> bool:
+        """Return True if the actor exists and is currently RUNNING or RESUMING."""
+        info = await self.get_actor(name=name, atespace=atespace)
+        if not info:
+            return False
+        return info.get("state") in ("ACTOR_STATE_RUNNING", "ACTOR_STATE_RESUMING")
 
 
 ate = SubstrateClient()
