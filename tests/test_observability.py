@@ -428,30 +428,27 @@ def test_setup_logging():
 
 
 @pytest.mark.asyncio
-async def test_list_sessions_overlays_active_in_memory():
-    """Verify that list_sessions_route includes active running sessions from _sessions with live progress."""
+async def test_list_sessions_stateless_db_and_gcs_fallback():
+    """Verify that stateless list_sessions_route reads from store and falls back to GCS."""
     from unittest.mock import AsyncMock, patch
     from storybook.models import PipelineState, SessionConfig, SourceConfig
-    from storybook.api.routes import _sessions, list_sessions_route
+    from storybook.api.routes import list_sessions_route
 
-    sid = "test-active-overlay"
+    sid = "test-active-stateless"
     state = PipelineState(
         session_id=sid,
         config=SessionConfig(source=SourceConfig(title="Test Book", author="Test Author")),
         current_stage="adapting_text",
         progress_pct=35,
     )
-    _sessions[sid] = state
-    try:
-        with patch("storybook.api.routes.store.list_sessions", new_callable=AsyncMock) as mock_list:
-            mock_list.return_value = []
-            results = await list_sessions_route()
-            active = next((r for r in results if r.session_id == sid), None)
-            assert active is not None
-            assert active.current_stage == "adapting_text"
-            assert active.progress_pct == 35
-    finally:
-        _sessions.pop(sid, None)
+    with patch("storybook.api.routes.store.list_sessions", new_callable=AsyncMock) as mock_list:
+        mock_list.return_value = [state]
+        results = await list_sessions_route()
+        active = next((r for r in results if r.session_id == sid), None)
+        assert active is not None
+        assert active.current_stage == "adapting_text"
+        assert active.progress_pct == 35
+
 
 
 @pytest.mark.asyncio

@@ -12,19 +12,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from storybook.agents.pipeline import run_pipeline
 from storybook.api.models import CreateSessionRequest, SessionResponse
+from storybook.config import settings
 from storybook.db import store
 from storybook.models import ACTIVE_AGE_RANGES, PipelineState
+from storybook.substrate import ate
 from storybook.tools import gcs
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-# In-memory store for active sessions — DB is the durable layer
-_sessions: dict[str, PipelineState] = {}
-_queues: dict[str, asyncio.Queue] = {}
-_tasks: dict[str, asyncio.Task] = {}
 
 
 # Catalogs of diverse art styles, literary traditions, and creative moods for dynamic seed injection
@@ -445,7 +441,7 @@ def _now() -> str:
 
 
 async def _require_session(session_id: str) -> PipelineState:
-    state = _sessions.get(session_id)
+    state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
     if state is None:
         try:
             state = await store.get_session(session_id)
@@ -458,8 +454,6 @@ async def _require_session(session_id: str) -> PipelineState:
 
 def _to_session_response(state: PipelineState) -> SessionResponse:
     sid = state.session_id
-    task = _tasks.get(sid)
-    is_running = task is not None and not task.done()
     return SessionResponse(
         session_id=sid,
         current_stage=state.current_stage,
@@ -469,27 +463,20 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
         wide_pdf_url=f"/api/v1/sessions/{sid}/pdf/wide" if state.wide_pdf_gcs_uri else None,
         trace_url=state.trace_url or None,
         errors=state.errors,
-        resumable=state.current_stage == "error" or (state.current_stage != "done" and not is_running),
+        resumable=state.current_stage == "error",
         started_at=state.started_at,
         finished_at=state.finished_at,
         adapted_from_source=state.adapted_from_source,
     )
 
 
-def _session_meta(state: PipelineState) -> dict:
-    return {
-        "session_id": state.session_id,
-        "config": state.config.model_dump(),
-        "current_stage": state.current_stage,
-        "progress_pct": state.progress_pct,
-        "pdf_gcs_uri": state.pdf_gcs_uri,
-        "wide_pdf_gcs_uri": state.wide_pdf_gcs_uri,
-        "trace_url": state.trace_url,
-        "errors": state.errors,
-        "started_at": state.started_at,
-        "finished_at": state.finished_at,
-        "adapted_from_source": state.adapted_from_source,
-    }
+async def _persist_session(state: PipelineState) -> None:
+    sid = state.session_id
+    await asyncio.to_thread(gcs.save_pipeline_state, sid, state)
+    try:
+        await store.upsert_session(state)
+    except Exception:
+        log.exception("Failed to persist session %s to DB", sid)
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=202)
@@ -497,97 +484,68 @@ async def create_session(body: CreateSessionRequest) -> SessionResponse:
     state = PipelineState(config=body.config, started_at=_now())
     sid = state.session_id
 
-    q: asyncio.Queue = asyncio.Queue()
-    _sessions[sid] = state
-    _queues[sid] = q
-    _tasks[sid] = asyncio.create_task(_run(sid, state, q))
+    await _persist_session(state)
+    await asyncio.to_thread(gcs.save_progress_events, sid, [], False)
 
-    await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(state))
-    try:
-        await store.upsert_session(state)
-    except Exception:
-        log.exception("Failed to persist new session %s to DB", sid)
+    await ate.create_actor(
+        template=settings.substrate_template,
+        atespace=settings.substrate_atespace,
+        name=sid,
+    )
+    return _to_session_response(state)
+
+
+@router.post("/sessions/{session_id}/cancel", response_model=SessionResponse)
+async def cancel_session(session_id: str) -> SessionResponse:
+    state = await _require_session(session_id)
+    await ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
+
+    if state.current_stage != "done":
+        state.current_stage = "error"
+        state.finished_at = _now()
+        state.errors.append("Cancelled by user")
+        await _persist_session(state)
 
     return _to_session_response(state)
 
 
-async def _run(sid: str, state: PipelineState, q: asyncio.Queue, resume: bool = False) -> None:
-    try:
-        result = await run_pipeline(state, q, resume=resume)
-        result.finished_at = _now()
-        _sessions[sid] = result
-    except Exception as exc:
-        log.exception("Pipeline failed for session %s", sid)
-        _sessions[sid].errors.append(str(exc))
-        _sessions[sid].current_stage = "error"
-        _sessions[sid].finished_at = _now()
-        await q.put({"stage": "error", "pct": 0, "message": str(exc)})
-    finally:
-        await q.put(None)  # sentinel — stream is done
-        final = _sessions[sid]
-        await asyncio.to_thread(gcs.save_session_meta, sid, _session_meta(final))
-        try:
-            await store.upsert_session(final)
-        except Exception:
-            log.exception("Failed to persist completed session %s to DB", sid)
-
-
 @router.post("/sessions/{session_id}/resume", response_model=SessionResponse, status_code=202)
 async def resume_session(session_id: str) -> SessionResponse:
-    state = _sessions.get(session_id)
-    if state is None:
-        try:
-            state = await store.get_session(session_id)
-        except Exception:
-            log.exception("DB unavailable for resume %s", session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    # Re-register in _sessions so the pipeline runner can update it
-    _sessions[session_id] = state
-    task = _tasks.get(session_id)
-    if task is not None and not task.done():
-        raise HTTPException(status_code=409, detail="Session is still running")
-
+    state = await _require_session(session_id)
     state.errors = []
     state.current_stage = "resuming"
-    state.progress_pct = 0
     state.finished_at = None
 
-    q: asyncio.Queue = asyncio.Queue()
-    _queues[session_id] = q
-    _tasks[session_id] = asyncio.create_task(_run(session_id, state, q, resume=True))
-
-    await asyncio.to_thread(gcs.save_session_meta, session_id, _session_meta(state))
-    try:
-        await store.upsert_session(state)
-    except Exception:
-        log.exception("Failed to persist resumed session %s to DB", session_id)
-
+    await _persist_session(state)
+    await ate.create_actor(
+        template=settings.substrate_template,
+        atespace=settings.substrate_atespace,
+        name=session_id,
+        resume=True,
+    )
     return _to_session_response(state)
 
 
 @router.get("/sessions/{session_id}/stream")
 async def stream_session(session_id: str) -> StreamingResponse:
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    q = _queues.get(session_id)
-    if q is None:
-        raise HTTPException(status_code=410, detail="Stream already consumed")
+    await _require_session(session_id)
 
     async def event_generator() -> AsyncIterator[str]:
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
+        cursor = -1
+        while True:
+            events, is_done = await asyncio.to_thread(gcs.load_progress_events, session_id)
+            for idx, ev in enumerate(events):
+                seq = int(ev.get("seq", idx))
+                if seq <= cursor:
                     continue
-                if event is None:
-                    break
-                yield f"data: {json.dumps(event)}\n\n"
-        finally:
-            _queues.pop(session_id, None)
+                cursor = seq
+                yield f"data: {json.dumps(ev)}\n\n"
+            if is_done:
+                asyncio.create_task(
+                    ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
+                )
+                break
+            await asyncio.sleep(1.0)
 
     return StreamingResponse(
         event_generator(),
@@ -601,14 +559,7 @@ async def stream_session(session_id: str) -> StreamingResponse:
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
 async def get_session(session_id: str) -> SessionResponse:
-    state = _sessions.get(session_id)
-    if state is None:
-        try:
-            state = await store.get_session(session_id)
-        except Exception:
-            log.exception("DB unavailable for get_session %s", session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    state = await _require_session(session_id)
     return _to_session_response(state)
 
 
@@ -656,14 +607,7 @@ async def get_page_image(session_id: str, page_number: int) -> Response:
 
 @router.get("/sessions/{session_id}/pdf")
 async def download_pdf(session_id: str) -> Response:
-    state = _sessions.get(session_id)
-    if state is None:
-        try:
-            state = await store.get_session(session_id)
-        except Exception:
-            pass
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    state = await _require_session(session_id)
     if not state.pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="PDF not ready")
     data, content_type = gcs.read_blob(session_id, "final", "storybook.pdf")
@@ -717,14 +661,7 @@ async def get_spread_image(session_id: str, spread_number: int, image_index: int
 
 @router.get("/sessions/{session_id}/pdf/wide")
 async def download_wide_pdf(session_id: str) -> Response:
-    state = _sessions.get(session_id)
-    if state is None:
-        try:
-            state = await store.get_session(session_id)
-        except Exception:
-            pass
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    state = await _require_session(session_id)
     if not state.wide_pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="Wide PDF not ready")
     data, content_type = gcs.read_blob(session_id, "final", "storybook_wide.pdf")
@@ -742,35 +679,7 @@ async def list_sessions_route(
     offset: int = 0,
     sort: str = "created_at_desc",
 ) -> list[SessionResponse]:
-    db_states: list[PipelineState] = []
-    db_available = True
-    try:
-        db_states = await store.list_sessions(
-            status=status, limit=limit, offset=offset, sort=sort
-        )
-    except Exception:
-        log.exception("DB unavailable — falling back to in-memory sessions")
-        db_available = False
-
-    if db_available:
-        # Overlay in-memory state for sessions that are actively running
-        state_map = {s.session_id: s for s in db_states}
-        for sid in list(state_map.keys()):
-            if sid in _sessions:
-                state_map[sid] = _sessions[sid]
-        for sid, active_state in _sessions.items():
-            if sid not in state_map:
-                state_map[sid] = active_state
-        states = list(state_map.values())
-    else:
-        # Best-effort fallback: filter and sort in Python
-        states = list(_sessions.values())
-        if status:
-            allowed = {s.strip() for s in status.split(",") if s.strip()}
-            states = [s for s in states if s.current_stage in allowed]
-        reverse = sort != "created_at_asc"
-        states.sort(key=lambda s: s.started_at or "", reverse=reverse)
-        if limit is not None:
-            states = states[offset: offset + limit]
-
+    states = await store.list_sessions(
+        status=status, limit=limit, offset=offset, sort=sort
+    )
     return [_to_session_response(s) for s in states]

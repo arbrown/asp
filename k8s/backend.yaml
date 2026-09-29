@@ -45,6 +45,21 @@ spec:
               value: "global"
             - name: RQLITE_URL
               value: "http://rqlite:4001"
+            - name: SUBSTRATE_ENABLED
+              value: "1"
+            - name: SUBSTRATE_API_ADDR
+              value: "api.ate-system.svc:443"
+            - name: SUBSTRATE_ATESPACE
+              value: "asp"
+            - name: SUBSTRATE_TEMPLATE
+              value: "asp-runner"
+          volumeMounts:
+            - name: ate-ca
+              mountPath: /var/run/secrets/ate.dev/ca
+              readOnly: true
+            - name: client-cert
+              mountPath: /var/run/secrets/ate.dev/client-cert
+              readOnly: true
           resources:
             requests:
               cpu: "500m"
@@ -64,6 +79,17 @@ spec:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 30
+      volumes:
+        - name: ate-ca
+          configMap:
+            name: ate-root-ca.crt
+        - name: client-cert
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: ate.dev/pod-identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: tls-combined.pem
 ---
 apiVersion: v1
 kind: Service

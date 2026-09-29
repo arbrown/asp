@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # rqlite database URL — defaults to the k8s ClusterIP service name
     rqlite_url: str = "http://rqlite:4001"
 
+    # Agent Substrate configuration
+    substrate_enabled: bool = True
+    substrate_api_addr: str = "api.ate-system.svc:443"
+    substrate_atespace: str = "asp"
+    substrate_template: str = "asp-runner"
+    substrate_ca_file: str = "/run/servicedns-ca/ca.crt"
+    substrate_cred_bundle: str = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+
 
 settings = Settings()
 

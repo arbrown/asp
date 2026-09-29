@@ -1,0 +1,116 @@
+// Minimal wire-compatible subset of Agent Substrate's ateapi.proto
+// used by Storybook's SubstrateClient (package ateapi, service Control).
+syntax = "proto3";
+
+package ateapi;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service Control {
+  rpc CreateAtespace(CreateAtespaceRequest) returns (Atespace) {}
+  rpc GetActor(GetActorRequest) returns (Actor) {}
+  rpc CreateActor(CreateActorRequest) returns (Actor) {}
+  rpc CreateActorEgressPolicy(CreateActorEgressPolicyRequest) returns (EgressPolicy) {}
+  rpc ResumeActor(ResumeActorRequest) returns (ResumeActorResponse) {}
+  rpc SuspendActor(SuspendActorRequest) returns (SuspendActorResponse) {}
+  rpc DeleteActor(DeleteActorRequest) returns (Actor) {}
+}
+
+message ResourceMetadata {
+  string atespace = 1;
+  string name = 2;
+  string uid = 3;
+  int64 version = 4;
+  google.protobuf.Timestamp create_time = 5;
+  google.protobuf.Timestamp update_time = 6;
+}
+
+message ObjectRef {
+  string atespace = 1;
+  string name = 2;
+}
+
+message Atespace {
+  ResourceMetadata metadata = 1;
+}
+
+enum ActorState {
+  ACTOR_STATE_UNSPECIFIED = 0;
+  ACTOR_STATE_RESUMING = 1;
+  ACTOR_STATE_RUNNING = 2;
+  ACTOR_STATE_SUSPENDING = 3;
+  ACTOR_STATE_SUSPENDED = 4;
+  ACTOR_STATE_PAUSING = 5;
+  ACTOR_STATE_PAUSED = 6;
+  ACTOR_STATE_CRASHED = 7;
+  ACTOR_STATE_DELETING = 8;
+}
+
+message WorkerAssignment {
+  string worker_namespace = 1;
+  string worker_pool = 2;
+  string worker_pod = 3;
+  string worker_pod_uid = 4;
+  string worker_pod_ip = 5;
+  ObjectRef worker = 6;
+}
+
+message ActorStatus {
+  ActorState state = 1;
+  WorkerAssignment worker_assignment = 2;
+}
+
+message Actor {
+  ResourceMetadata metadata = 1;
+  ObjectRef actor_template = 4;
+  ActorStatus status = 7;
+}
+
+message EgressPolicy {
+  ResourceMetadata metadata = 1;
+  repeated EgressRule rules = 2;
+}
+
+message EgressRule {
+  google.protobuf.Empty all = 3;
+}
+
+message CreateAtespaceRequest {
+  Atespace atespace = 1;
+}
+
+message GetActorRequest {
+  ObjectRef actor = 1;
+}
+
+message CreateActorRequest {
+  Actor actor = 1;
+}
+
+message CreateActorEgressPolicyRequest {
+  ObjectRef actor = 1;
+  EgressPolicy egress_policy = 2;
+}
+
+message ResumeActorRequest {
+  ObjectRef actor = 1;
+}
+
+message ResumeActorResponse {
+  Actor actor = 1;
+  bool resumed = 2;
+}
+
+message SuspendActorRequest {
+  ObjectRef actor = 1;
+}
+
+message SuspendActorResponse {
+  Actor actor = 1;
+}
+
+message DeleteActorRequest {
+  ObjectRef actor = 1;
+  bool any_state = 2;
+}
