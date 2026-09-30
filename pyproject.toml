@@ -17,6 +17,9 @@ dependencies = [
     "jinja2>=3.1",
     "opentelemetry-sdk>=1.25",
     "opentelemetry-exporter-gcp-trace>=1.8",
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=5.0",
 ]
 
 [project.optional-dependencies]

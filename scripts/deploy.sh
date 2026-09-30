@@ -31,11 +31,16 @@ echo "==> Authenticating Docker with Artifact Registry..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
 echo "==> Configuring kubectl credentials..."
-gcloud container clusters get-credentials "${GKE_CLUSTER:-storybook-cluster}" --region "${REGION}" --project "${PROJECT_ID}"
+gcloud container clusters get-credentials "${GKE_CLUSTER:-storybook-cluster}" \
+  --location "${GKE_LOCATION:-us-central1-a}" --project "${PROJECT_ID}"
 
 echo "==> Building backend image..."
 docker buildx build --platform linux/amd64 --push \
   -f "${ROOT}/Dockerfile.backend" -t "${REGISTRY}/backend:latest" "${ROOT}"
+
+echo "==> Building runner image (asp-runner)..."
+docker buildx build --platform linux/amd64 --push \
+  -f "${ROOT}/Dockerfile.runner" -t "${REGISTRY}/asp-runner:latest" "${ROOT}"
 
 echo "==> Building frontend image..."
 docker buildx build --platform linux/amd64 --push \
@@ -65,3 +70,4 @@ kubectl rollout status deployment/storybook-ui
 INGRESS_IP=$(kubectl get ingress storybook-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
 echo ""
 echo "==> Done! Ingress IP: ${INGRESS_IP}"
+

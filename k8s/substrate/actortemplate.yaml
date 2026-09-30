@@ -1,0 +1,65 @@
+# Substrate ActorTemplate (protojson-shaped ateapipb.ActorTemplate)
+# Created via: kubectl ate create actor-template -f -
+metadata:
+  atespace: asp
+  name: asp-runner
+workerSelector:
+  matchLabels:
+    workload: asp-runner
+containers:
+- name: runner
+  image: ${ASP_RUNNER_IMAGE_DIGEST}
+  env:
+  - name: PORT
+    value: "8080"
+  - name: GCP_PROJECT_ID
+    value: "${GCP_PROJECT_ID}"
+  - name: GCP_REGION
+    value: "${GCP_REGION}"
+  - name: GCS_ARTIFACTS_BUCKET
+    value: "${GCS_ARTIFACTS_BUCKET}"
+  - name: GOOGLE_GENAI_USE_VERTEXAI
+    value: "1"
+  - name: GOOGLE_CLOUD_PROJECT
+    value: "${GCP_PROJECT_ID}"
+  - name: GOOGLE_CLOUD_LOCATION
+    value: "global"
+  - name: RQLITE_URL
+    value: "http://rqlite.default.svc.cluster.local:4001"
+  - name: GCE_METADATA_HOST
+    value: "169.254.169.254"
+  - name: GCE_METADATA_IP
+    value: "169.254.169.254"
+  volumeMounts:
+  - name: metadata
+    mountPath: /run/ate/metadata
+  readyz:
+    httpGet:
+      path: /readyz
+      port: 8080
+    timeoutSeconds: 60
+volumes:
+- name: metadata
+  systemInfo:
+    dataSources:
+    - actorMetadata:
+        items:
+        - field: ACTOR_METADATA_FIELD_NAME
+          path: actor-name
+        - field: ACTOR_METADATA_FIELD_ATESPACE
+          path: actor-atespace
+        - field: ACTOR_METADATA_FIELD_UID
+          path: actor-uid
+resources:
+  limits:
+  - name: cpu
+    quantity: "2"
+  - name: memory
+    quantity: 4Gi
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: gs://${SUBSTRATE_STATE_BUCKET}/asp/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: asp-gvisor

@@ -60,6 +60,75 @@ def save_session_meta(session_id: str, data: dict) -> None:
     write_json(session_id, "session.json", data=data)
 
 
+def save_pipeline_state(session_id: str, state: object) -> str:
+    """Persist full PipelineState checkpoint to sessions/{id}/state.json and session.json."""
+    from storybook.models import PipelineState
+
+    if isinstance(state, PipelineState):
+        payload = state.model_dump(mode="json")
+        # Keep source_text in original/source_text.txt once adapted to keep state.json compact
+        if payload.get("spread_contents") and len(payload.get("source_text") or "") > 20000:
+            payload["source_text"] = ""
+    elif isinstance(state, dict):
+        payload = state
+    else:
+        raise TypeError(f"Unsupported state type: {type(state)}")
+
+    uri = write_json(session_id, "state.json", data=payload)
+    meta = {
+        "session_id": payload.get("session_id", session_id),
+        "config": payload.get("config", {}),
+        "current_stage": payload.get("current_stage", "initializing"),
+        "progress_pct": payload.get("progress_pct", 0),
+        "pdf_gcs_uri": payload.get("pdf_gcs_uri", ""),
+        "wide_pdf_gcs_uri": payload.get("wide_pdf_gcs_uri", ""),
+        "trace_url": payload.get("trace_url", ""),
+        "errors": payload.get("errors", []),
+        "started_at": payload.get("started_at"),
+        "finished_at": payload.get("finished_at"),
+        "adapted_from_source": payload.get("adapted_from_source", True),
+    }
+    save_session_meta(session_id, meta)
+    return uri
+
+
+def load_pipeline_state(session_id: str):
+    """Load PipelineState from sessions/{id}/state.json, falling back to session.json."""
+    from storybook.models import PipelineState
+
+    try:
+        raw = json.loads(read_text(session_id, "state.json"))
+        return PipelineState.model_validate(raw)
+    except Exception:
+        try:
+            raw = json.loads(read_text(session_id, "session.json"))
+            return PipelineState.model_validate(raw)
+        except Exception:
+            return None
+
+
+def save_progress_events(session_id: str, events: list[dict], done: bool = False) -> str:
+    """Persist progress event stream checkpoint to sessions/{id}/events.json."""
+    return write_json(
+        session_id,
+        "events.json",
+        data={"events": events, "done": done},
+    )
+
+
+def load_progress_events(session_id: str) -> tuple[list[dict], bool]:
+    """Load (events, done) from sessions/{id}/events.json."""
+    try:
+        raw = json.loads(read_text(session_id, "events.json"))
+        if isinstance(raw, dict):
+            return list(raw.get("events", [])), bool(raw.get("done", False))
+        if isinstance(raw, list):
+            return raw, False
+    except Exception:
+        pass
+    return [], False
+
+
 def load_all_session_meta() -> list[dict]:
     """Scan GCS and return metadata for all known sessions."""
     bucket = _bucket()

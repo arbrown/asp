@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-workloads
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: agent-workloads
+  annotations:
+    iam.gke.io/gcp-service-account: storybook-backend@${GCP_PROJECT_ID}.iam.gserviceaccount.com
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: asp-workerpool
+  namespace: agent-workloads
+  labels:
+    workload: asp-runner
+spec:
+  replicas: 3
+  workerImage: ${ATEOM_GVISOR_IMAGE}
+  template:
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+      requests:
+        cpu: 500m
+        memory: 4Gi
