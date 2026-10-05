@@ -50,6 +50,14 @@ async def init_db() -> None:
         ],
         ["CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)"],
         ["CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at)"],
+        [
+            "CREATE TABLE IF NOT EXISTS session_tokens ("
+            "session_id TEXT PRIMARY KEY, "
+            "user_email TEXT NOT NULL, "
+            "downscoped_token TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL"
+            ")"
+        ],
     ])
     # Auto-migration for pre-existing tables without user_email
     try:
@@ -73,6 +81,39 @@ async def init_db() -> None:
         )
     except Exception as exc:
         log.debug("Legacy user_email migration note: %s", exc)
+
+
+async def save_actor_credentials(
+    session_id: str,
+    user_email: str,
+    downscoped_token: str | None,
+) -> None:
+    """Persist ephemeral STS downscoped token for a Substrate Actor session."""
+    await _get().execute(
+        "INSERT OR REPLACE INTO session_tokens "
+        "(session_id, user_email, downscoped_token, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        session_id,
+        (user_email or "").strip().lower(),
+        downscoped_token or "",
+        _now(),
+    )
+
+
+async def get_actor_credentials(session_id: str) -> tuple[str, str | None]:
+    """Retrieve (user_email, downscoped_token) for a Substrate Actor session."""
+    try:
+        rows = await _get().query(
+            "SELECT user_email, downscoped_token FROM session_tokens WHERE session_id = ?",
+            session_id,
+        )
+        if rows:
+            email = str(rows[0].get("user_email") or "").strip().lower()
+            token = str(rows[0].get("downscoped_token") or "").strip() or None
+            return email, token
+    except Exception as exc:
+        log.debug("Could not fetch actor credentials for %s: %s", session_id, exc)
+    return "", None
 
 
 async def upsert_session(

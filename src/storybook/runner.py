@@ -144,6 +144,16 @@ async def execute_session(
     init_tracing(settings.gcp_project_id)
     await store.init_db()
 
+    if not resolved_user or not resolved_token:
+        db_user, db_token = await store.get_actor_credentials(session_id)
+        resolved_user = resolved_user or db_user
+        resolved_token = resolved_token or db_token
+        if resolved_user or resolved_token:
+            gcs.set_scoped_credentials(
+                user_email=resolved_user or None,
+                token=resolved_token,
+            )
+
     log.info("Loading pipeline state from GCS for session %s...", session_id)
     state = None
     for attempt in range(1, 11):
