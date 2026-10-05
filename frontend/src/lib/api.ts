@@ -1,4 +1,40 @@
 const BASE = "/api/v1";
+const DEFAULT_USER_EMAIL = "dev@storybook.local";
+
+export interface AuthenticatedUser {
+  email: string;
+  auth_type: string;
+}
+
+export function getDevUserEmail(): string {
+  try {
+    return localStorage.getItem("storybook_user_email") || DEFAULT_USER_EMAIL;
+  } catch {
+    return DEFAULT_USER_EMAIL;
+  }
+}
+
+function buildHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    "X-Dev-User-Email": getDevUserEmail(),
+    ...extra,
+  };
+}
+
+export async function getCurrentUser(): Promise<AuthenticatedUser> {
+  try {
+    const res = await fetch(`${BASE}/me`, {
+      credentials: "include",
+      headers: buildHeaders(),
+    });
+    if (res.ok) {
+      return res.json();
+    }
+  } catch {
+    // Fall through to default dev identity
+  }
+  return { email: getDevUserEmail(), auth_type: "dev" };
+}
 
 export interface SourceConfig {
   gutenberg_url?: string;
@@ -18,6 +54,7 @@ export interface SessionConfig {
 
 export interface SessionSummary {
   session_id: string;
+  user_email?: string;
   current_stage: string;
   progress_pct: number;
   config?: SessionConfig;
@@ -63,7 +100,10 @@ export interface ListSessionsParams {
 }
 
 export async function getLuckyConfig(): Promise<LuckyConfig> {
-  const res = await fetch(`${BASE}/lucky`);
+  const res = await fetch(`${BASE}/lucky`, {
+    credentials: "include",
+    headers: buildHeaders(),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -98,7 +138,8 @@ export interface ShuffleRequest {
 export async function shuffleField(req: ShuffleRequest): Promise<ShuffleResponse> {
   const res = await fetch(`${BASE}/shuffle`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -108,7 +149,8 @@ export async function shuffleField(req: ShuffleRequest): Promise<ShuffleResponse
 export async function createSession(config: SessionConfig): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ config }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -116,13 +158,20 @@ export async function createSession(config: SessionConfig): Promise<SessionSumma
 }
 
 export async function getSession(id: string): Promise<SessionSummary> {
-  const res = await fetch(`${BASE}/sessions/${id}`);
+  const res = await fetch(`${BASE}/sessions/${id}`, {
+    credentials: "include",
+    headers: buildHeaders(),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 export async function resumeSession(id: string): Promise<SessionSummary> {
-  const res = await fetch(`${BASE}/sessions/${id}/resume`, { method: "POST" });
+  const res = await fetch(`${BASE}/sessions/${id}/resume`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -133,7 +182,10 @@ export async function listSessions(params?: ListSessionsParams): Promise<Session
   if (params?.limit !== undefined) url.searchParams.set("limit", String(params.limit));
   if (params?.offset !== undefined) url.searchParams.set("offset", String(params.offset));
   if (params?.sort) url.searchParams.set("sort", params.sort);
-  const res = await fetch(url.pathname + url.search);
+  const res = await fetch(url.pathname + url.search, {
+    credentials: "include",
+    headers: buildHeaders(),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -143,7 +195,9 @@ export function streamSession(
   onEvent: (e: ProgressEvent) => void,
   onDone: () => void
 ): () => void {
-  const es = new EventSource(`${BASE}/sessions/${id}/stream`);
+  const es = new EventSource(`${BASE}/sessions/${id}/stream`, {
+    withCredentials: true,
+  });
   es.onmessage = (msg) => {
     const data: ProgressEvent = JSON.parse(msg.data);
     onEvent(data);

@@ -608,20 +608,21 @@ async def _run_pipeline(
                     len(state.source_text.split()),
                 )
 
+                source_blob_path = gcs._blob_path(sid, "original", "source_text.txt")
                 with SpanContextManager(
                     "gcs.write_source_text",
                     attributes={
                         "gcs.bucket": settings.gcs_artifacts_bucket,
-                        "gcs.path": f"sessions/{sid}/original/source_text.txt",
+                        "gcs.path": source_blob_path,
                         "text.length_chars": len(state.source_text),
                         "text.length_words": len(state.source_text.split()),
                     },
                 ):
                     gcs.write_text(sid, "original", "source_text.txt", content=state.source_text)
                 log.info(
-                    "Saved source text to GCS at gs://%s/sessions/%s/original/source_text.txt",
+                    "Saved source text to GCS at gs://%s/%s",
                     settings.gcs_artifacts_bucket,
-                    sid,
+                    source_blob_path,
                 )
                 await emit("fetching", 10, message="Source text fetched", adapted_from_source=True)
             else:
@@ -1141,11 +1142,11 @@ async def _run_pipeline(
         results: dict[int, dict[int, bytes]] = {s: imgs for s, imgs in await asyncio.gather(*tasks)}
 
         state.html_gcs_uris = [
-            f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/spreads/spread_{s:02d}.html"
+            f"gs://{settings.gcs_artifacts_bucket}/{gcs._blob_path(sid, 'spreads', f'spread_{s:02d}.html')}"
             for s in range(total_spreads)
         ]
         state.image_gcs_uris = [
-            f"gs://{settings.gcs_artifacts_bucket}/sessions/{sid}/images/spread_{s:02d}_img0.png"
+            f"gs://{settings.gcs_artifacts_bucket}/{gcs._blob_path(sid, 'images', f'spread_{s:02d}_img0.png')}"
             for s in range(total_spreads)
             if results.get(s)
         ]

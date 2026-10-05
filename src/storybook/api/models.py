@@ -13,6 +13,7 @@ class CreateSessionRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
+    user_email: Optional[str] = None
     current_stage: str
     progress_pct: int
     config: Optional[SessionConfig] = None

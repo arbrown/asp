@@ -20,7 +20,7 @@ import os
 import random
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -100,10 +100,46 @@ async def _wait_for_actor_assignment() -> str:
         await asyncio.sleep(0.05)
 
 
-async def execute_session(session_id: str, force_resume: bool = False) -> int:
+def _resolve_runner_credentials(
+    user_email: str | None = None,
+    downscoped_token: str | None = None,
+) -> tuple[str, str | None]:
+    """Read ASP_USER_EMAIL and GCS_DOWNSCOPED_TOKEN from explicit args, env, or metadata volume."""
+    resolved_user = (
+        user_email
+        or os.environ.get("ASP_USER_EMAIL", "").strip()
+        or _read_metadata_file("user-email")
+        or _read_metadata_file("ASP_USER_EMAIL")
+    )
+    resolved_token = (
+        downscoped_token
+        or os.environ.get("GCS_DOWNSCOPED_TOKEN", "").strip()
+        or _read_metadata_file("gcs-downscoped-token")
+        or _read_metadata_file("GCS_DOWNSCOPED_TOKEN")
+        or None
+    )
+    return resolved_user, resolved_token
+
+
+async def execute_session(
+    session_id: str,
+    force_resume: bool = False,
+    user_email: str | None = None,
+    downscoped_token: str | None = None,
+) -> int:
     """Load PipelineState from GCS, run the 11-stage ADK pipeline, and checkpoint."""
     # Re-seed PRNG after potential snapshot restore
     random.seed(os.urandom(16))
+
+    resolved_user, resolved_token = _resolve_runner_credentials(
+        user_email=user_email,
+        downscoped_token=downscoped_token,
+    )
+    if resolved_user or resolved_token:
+        gcs.set_scoped_credentials(
+            user_email=resolved_user or None,
+            token=resolved_token,
+        )
 
     init_tracing(settings.gcp_project_id)
     await store.init_db()
@@ -128,14 +164,25 @@ async def execute_session(session_id: str, force_resume: bool = False) -> int:
         log.error("Could not load PipelineState for session %s from GCS or rqlite", session_id)
         return 1
 
+    # Ensure GCS client is scoped to the session owner if user_email came from rqlite state
+    effective_user = resolved_user or getattr(state, "user_email", "")
+    if effective_user:
+        state.user_email = effective_user
+        if not resolved_user:
+            gcs.set_scoped_credentials(
+                user_email=effective_user,
+                token=resolved_token,
+            )
+
     resume = (
         force_resume
         or state.current_stage == "resuming"
         or os.environ.get("STORYBOOK_RESUME") == "1"
     )
     log.info(
-        "Starting runner for session %s (resume=%s, current_stage=%s, title=%r)",
+        "Starting runner for session %s (user=%r, resume=%s, current_stage=%s, title=%r)",
         session_id,
+        effective_user,
         resume,
         state.current_stage,
         state.config.source.title,
@@ -151,14 +198,14 @@ async def execute_session(session_id: str, force_resume: bool = False) -> int:
 
     try:
         await run_pipeline(state, sink, resume=resume)
-        state.finished_at = datetime.now(timezone.utc).isoformat()
+        state.finished_at = datetime.now(UTC).isoformat()
         await sink.put(None)
         log.info("Runner completed session %s successfully", session_id)
         return 0
     except Exception as exc:
         log.exception("Pipeline failed for session %s", session_id)
         state.current_stage = "error"
-        state.finished_at = datetime.now(timezone.utc).isoformat()
+        state.finished_at = datetime.now(UTC).isoformat()
         state.errors.append(str(exc))
         await sink.put({"stage": "error", "message": str(exc)})
         await sink.put(None)
@@ -172,7 +219,12 @@ async def _async_main(args: argparse.Namespace) -> int:
         _start_readyz_server(port=port)
         session_id = await _wait_for_actor_assignment()
 
-    return await execute_session(session_id=session_id, force_resume=args.resume)
+    return await execute_session(
+        session_id=session_id,
+        force_resume=args.resume,
+        user_email=getattr(args, "user_email", None),
+        downscoped_token=getattr(args, "downscoped_token", None),
+    )
 
 
 def main() -> None:
@@ -187,6 +239,16 @@ def main() -> None:
         "--resume",
         action="store_true",
         help="Resume pipeline execution from existing GCS checkpoints.",
+    )
+    parser.add_argument(
+        "--user-email",
+        default=os.environ.get("ASP_USER_EMAIL", ""),
+        help="Authenticated user email owning the session.",
+    )
+    parser.add_argument(
+        "--downscoped-token",
+        default=os.environ.get("GCS_DOWNSCOPED_TOKEN", ""),
+        help="Short-lived STS CAB downscoped token for GCS access.",
     )
     parser.add_argument(
         "--port",

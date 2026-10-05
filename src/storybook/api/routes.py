@@ -8,16 +8,17 @@ import random
 from datetime import datetime, timezone
 from typing import AsyncIterator, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from storybook.api.auth import AuthenticatedUser, get_current_user
 from storybook.api.models import CreateSessionRequest, SessionResponse
 from storybook.config import settings
 from storybook.db import store
 from storybook.models import ACTIVE_AGE_RANGES, PipelineState
 from storybook.substrate import ate
-from storybook.tools import gcs
+from storybook.tools import gcs, iam
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -440,15 +441,58 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _require_session(session_id: str) -> PipelineState:
-    state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
-    if state is None:
-        try:
-            state = await store.get_session(session_id)
-        except Exception:
-            log.exception("DB unavailable for session %s", session_id)
+def _resolve_user(user: AuthenticatedUser | str | object | None = None) -> AuthenticatedUser:
+    """Normalize a FastAPI-injected or directly passed user argument."""
+    if isinstance(user, AuthenticatedUser):
+        return user
+    if isinstance(user, str) and user.strip():
+        return AuthenticatedUser(email=user.strip().lower(), auth_type="dev")
+    return AuthenticatedUser(email=settings.dev_default_email, auth_type="dev")
+
+
+def _verify_session_owner(state: PipelineState, user_email: Optional[str]) -> None:
+    if not user_email:
+        return
+    req_user = user_email.strip().lower()
+    row_owner = (getattr(state, "user_email", None) or store.LEGACY_USER_EMAIL).strip().lower()
+    allowed_owners = {req_user}
+    if req_user == store.LEGACY_OWNER_EMAIL:
+        allowed_owners.add(store.LEGACY_USER_EMAIL)
+    if row_owner not in allowed_owners:
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: session belongs to another user",
+        )
+
+
+async def _require_session(
+    session_id: str,
+    user_email: Optional[str] = None,
+) -> PipelineState:
+    state: Optional[PipelineState] = None
+    try:
+        state = await asyncio.to_thread(gcs.load_pipeline_state, session_id, user_email)
+    except TypeError:
+        # Backwards-compatibility if a unit test mocks load_pipeline_state(sid) with 1 arg
+        state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
+
+    if state is not None:
+        _verify_session_owner(state, user_email)
+        return state
+
+    try:
+        state = await store.get_session(session_id, user_email=user_email)
+    except HTTPException:
+        raise
+    except TypeError:
+        state = await store.get_session(session_id)
+    except Exception:
+        log.exception("DB unavailable for session %s", session_id)
+
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    _verify_session_owner(state, user_email)
     return state
 
 
@@ -456,6 +500,7 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
     sid = state.session_id
     return SessionResponse(
         session_id=sid,
+        user_email=getattr(state, "user_email", None),
         current_stage=state.current_stage,
         progress_pct=state.progress_pct,
         config=state.config,
@@ -470,70 +515,142 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
     )
 
 
-async def _persist_session(state: PipelineState) -> None:
+async def _persist_session(
+    state: PipelineState,
+    user_email: Optional[str] = None,
+) -> None:
     sid = state.session_id
-    await asyncio.to_thread(gcs.save_pipeline_state, sid, state)
+    raw_owner = user_email or getattr(state, "user_email", None) or settings.dev_default_email
+    owner = raw_owner.strip().lower()
+    state.user_email = owner
     try:
+        await asyncio.to_thread(gcs.save_pipeline_state, sid, state, owner)
+    except TypeError:
+        await asyncio.to_thread(gcs.save_pipeline_state, sid, state)
+    try:
+        await store.upsert_session(state, user_email=owner)
+    except TypeError:
         await store.upsert_session(state)
     except Exception:
         log.exception("Failed to persist session %s to DB", sid)
 
 
+async def _mint_actor_token(user_email: str, session_id: str) -> str | None:
+    try:
+        return await asyncio.to_thread(
+            iam.mint_session_downscoped_token,
+            user_email=user_email,
+            session_id=session_id,
+            bucket_name=settings.gcs_artifacts_bucket,
+        )
+    except Exception as exc:
+        log.warning(
+            "Could not mint STS downscoped token for %s/%s (falling back to ambient): %s",
+            user_email,
+            session_id,
+            exc,
+        )
+        return None
+
+
+@router.get("/me", response_model=AuthenticatedUser)
+async def get_me(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    return _resolve_user(user)
+
+
 @router.post("/sessions", response_model=SessionResponse, status_code=202)
-async def create_session(body: CreateSessionRequest) -> SessionResponse:
-    state = PipelineState(config=body.config, started_at=_now())
+async def create_session(
+    body: CreateSessionRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SessionResponse:
+    resolved_user = _resolve_user(user)
+    state = PipelineState(
+        user_email=resolved_user.email,
+        config=body.config,
+        started_at=_now(),
+    )
     sid = state.session_id
 
-    await _persist_session(state)
-    await asyncio.to_thread(gcs.save_progress_events, sid, [], False)
+    await _persist_session(state, user_email=resolved_user.email)
+    try:
+        await asyncio.to_thread(gcs.save_progress_events, sid, [], False, resolved_user.email)
+    except TypeError:
+        await asyncio.to_thread(gcs.save_progress_events, sid, [], False)
 
+    downscoped_token = await _mint_actor_token(resolved_user.email, sid)
     await ate.create_actor(
         template=settings.substrate_template,
         atespace=settings.substrate_atespace,
         name=sid,
+        user_email=resolved_user.email,
+        downscoped_token=downscoped_token,
     )
     return _to_session_response(state)
 
 
 @router.post("/sessions/{session_id}/cancel", response_model=SessionResponse)
-async def cancel_session(session_id: str) -> SessionResponse:
-    state = await _require_session(session_id)
+async def cancel_session(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SessionResponse:
+    resolved_user = _resolve_user(user)
+    state = await _require_session(session_id, user_email=resolved_user.email)
     await ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
 
     if state.current_stage != "done":
         state.current_stage = "error"
         state.finished_at = _now()
         state.errors.append("Cancelled by user")
-        await _persist_session(state)
+        await _persist_session(state, user_email=resolved_user.email)
 
     return _to_session_response(state)
 
 
 @router.post("/sessions/{session_id}/resume", response_model=SessionResponse, status_code=202)
-async def resume_session(session_id: str) -> SessionResponse:
-    state = await _require_session(session_id)
+async def resume_session(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SessionResponse:
+    resolved_user = _resolve_user(user)
+    state = await _require_session(session_id, user_email=resolved_user.email)
     state.errors = []
     state.current_stage = "resuming"
     state.finished_at = None
 
-    await _persist_session(state)
+    await _persist_session(state, user_email=resolved_user.email)
+    downscoped_token = await _mint_actor_token(resolved_user.email, session_id)
     await ate.create_actor(
         template=settings.substrate_template,
         atespace=settings.substrate_atespace,
         name=session_id,
         resume=True,
+        user_email=resolved_user.email,
+        downscoped_token=downscoped_token,
     )
     return _to_session_response(state)
 
 
 @router.get("/sessions/{session_id}/stream")
-async def stream_session(session_id: str) -> StreamingResponse:
-    await _require_session(session_id)
+async def stream_session(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> StreamingResponse:
+    resolved_user = _resolve_user(user)
+    await _require_session(session_id, user_email=resolved_user.email)
 
     async def event_generator() -> AsyncIterator[str]:
         cursor = -1
         while True:
-            events, is_done = await asyncio.to_thread(gcs.load_progress_events, session_id)
+            try:
+                events, is_done = await asyncio.to_thread(
+                    gcs.load_progress_events, session_id, resolved_user.email
+                )
+            except TypeError:
+                events, is_done = await asyncio.to_thread(
+                    gcs.load_progress_events, session_id
+                )
             for idx, ev in enumerate(events):
                 seq = int(ev.get("seq", idx))
                 if seq <= cursor:
@@ -558,16 +675,30 @@ async def stream_session(session_id: str) -> StreamingResponse:
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str) -> SessionResponse:
-    state = await _require_session(session_id)
+async def get_session(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SessionResponse:
+    resolved_user = _resolve_user(user)
+    state = await _require_session(session_id, user_email=resolved_user.email)
     return _to_session_response(state)
 
 
 @router.get("/sessions/{session_id}/pages/{page_number}/html")
-async def get_page_html(session_id: str, page_number: int) -> Response:
-    await _require_session(session_id)
+async def get_page_html(
+    session_id: str,
+    page_number: int,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    resolved_user = _resolve_user(user)
+    await _require_session(session_id, user_email=resolved_user.email)
     try:
-        data = gcs.read_bytes(session_id, "pages", f"page_{page_number:02d}.html")
+        data = gcs.read_bytes(
+            session_id,
+            "pages",
+            f"page_{page_number:02d}.html",
+            user_email=resolved_user.email,
+        )
     except Exception:
         raise HTTPException(status_code=404, detail="Page HTML not ready")
     return Response(
@@ -578,7 +709,11 @@ async def get_page_html(session_id: str, page_number: int) -> Response:
 
 
 @router.get("/sessions/{session_id}/images/{page_number}")
-async def get_page_image(session_id: str, page_number: int) -> Response:
+async def get_page_image(
+    session_id: str,
+    page_number: int,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
     """Legacy per-page image route, kept for the History thumbnail.
 
     Sessions generated before the spread redesign (2026-06-17) wrote per-page
@@ -586,7 +721,8 @@ async def get_page_image(session_id: str, page_number: int) -> Response:
     images/spread_NN_imgX.png. Try the legacy path first, then fall back to the
     cover spread for new-format sessions.
     """
-    await _require_session(session_id)
+    resolved_user = _resolve_user(user)
+    await _require_session(session_id, user_email=resolved_user.email)
     candidates = [
         f"page_{page_number:02d}.png",
         "spread_00_img0.png",
@@ -594,7 +730,9 @@ async def get_page_image(session_id: str, page_number: int) -> Response:
     ]
     for fname in candidates:
         try:
-            data, _ = gcs.read_blob(session_id, "images", fname)
+            data, _ = gcs.read_blob(
+                session_id, "images", fname, user_email=resolved_user.email
+            )
         except Exception:
             continue
         return Response(
@@ -606,11 +744,17 @@ async def get_page_image(session_id: str, page_number: int) -> Response:
 
 
 @router.get("/sessions/{session_id}/pdf")
-async def download_pdf(session_id: str) -> Response:
-    state = await _require_session(session_id)
+async def download_pdf(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    resolved_user = _resolve_user(user)
+    state = await _require_session(session_id, user_email=resolved_user.email)
     if not state.pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="PDF not ready")
-    data, content_type = gcs.read_blob(session_id, "final", "storybook.pdf")
+    data, content_type = gcs.read_blob(
+        session_id, "final", "storybook.pdf", user_email=resolved_user.email
+    )
     return Response(
         content=data,
         media_type="application/pdf",
@@ -619,10 +763,20 @@ async def download_pdf(session_id: str) -> Response:
 
 
 @router.get("/sessions/{session_id}/spreads/{spread_number}/html")
-async def get_spread_html(session_id: str, spread_number: int) -> Response:
-    await _require_session(session_id)
+async def get_spread_html(
+    session_id: str,
+    spread_number: int,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    resolved_user = _resolve_user(user)
+    await _require_session(session_id, user_email=resolved_user.email)
     try:
-        data = gcs.read_bytes(session_id, "spreads", f"spread_{spread_number:02d}.html")
+        data = gcs.read_bytes(
+            session_id,
+            "spreads",
+            f"spread_{spread_number:02d}.html",
+            user_email=resolved_user.email,
+        )
     except Exception:
         raise HTTPException(status_code=404, detail="Spread HTML not ready")
     return Response(
@@ -633,7 +787,12 @@ async def get_spread_html(session_id: str, spread_number: int) -> Response:
 
 
 @router.get("/sessions/{session_id}/spreads/{spread_number}/image/{image_index}")
-async def get_spread_image(session_id: str, spread_number: int, image_index: int) -> Response:
+async def get_spread_image(
+    session_id: str,
+    spread_number: int,
+    image_index: int,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
     """Return one spread image.
 
     The frontend's progress preview always asks for image_index=0, but the spread
@@ -642,12 +801,16 @@ async def get_spread_image(session_id: str, spread_number: int, image_index: int
     index isn't there, fall through to the other index before 404-ing. Truly
     image-less spreads still 404 — there's nothing to show.
     """
-    await _require_session(session_id)
+    resolved_user = _resolve_user(user)
+    await _require_session(session_id, user_email=resolved_user.email)
     candidates = [image_index] + [i for i in (0, 1) if i != image_index]
     for idx in candidates:
         try:
             data, _ = gcs.read_blob(
-                session_id, "images", f"spread_{spread_number:02d}_img{idx}.png"
+                session_id,
+                "images",
+                f"spread_{spread_number:02d}_img{idx}.png",
+                user_email=resolved_user.email,
             )
         except Exception:
             continue
@@ -660,11 +823,17 @@ async def get_spread_image(session_id: str, spread_number: int, image_index: int
 
 
 @router.get("/sessions/{session_id}/pdf/wide")
-async def download_wide_pdf(session_id: str) -> Response:
-    state = await _require_session(session_id)
+async def download_wide_pdf(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    resolved_user = _resolve_user(user)
+    state = await _require_session(session_id, user_email=resolved_user.email)
     if not state.wide_pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="Wide PDF not ready")
-    data, content_type = gcs.read_blob(session_id, "final", "storybook_wide.pdf")
+    data, content_type = gcs.read_blob(
+        session_id, "final", "storybook_wide.pdf", user_email=resolved_user.email
+    )
     return Response(
         content=data,
         media_type="application/pdf",
@@ -673,13 +842,20 @@ async def download_wide_pdf(session_id: str) -> Response:
 
 
 @router.get("/sessions", response_model=list[SessionResponse])
+@router.get("/history", response_model=list[SessionResponse])
 async def list_sessions_route(
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: int = 0,
     sort: str = "created_at_desc",
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[SessionResponse]:
+    resolved_user = _resolve_user(user)
     states = await store.list_sessions(
-        status=status, limit=limit, offset=offset, sort=sort
+        status=status,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        user_email=resolved_user.email,
     )
     return [_to_session_response(s) for s in states]

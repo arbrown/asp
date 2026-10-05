@@ -4,11 +4,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     gcp_project_id: str
     gcp_region: str = "us-central1"
     gcs_artifacts_bucket: str
+    app_domain: str = ""
 
     # Text models
     model_adapter: str = "gemini-3.5-flash"
@@ -43,6 +48,11 @@ class Settings(BaseSettings):
     substrate_template: str = "asp-runner"
     substrate_ca_file: str = "/run/servicedns-ca/ca.crt"
     substrate_cred_bundle: str = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+
+    # Authentication & Multi-tenancy
+    dev_auth_enabled: bool = True
+    dev_default_email: str = "dev@storybook.local"
+    legacy_owner_email: str = "owner@storybook.local"
 
 
 settings = Settings()

@@ -128,12 +128,19 @@ class SubstrateClient:
         atespace: str,
         name: str,
         resume: bool = False,
+        user_email: str = "",
+        downscoped_token: str | None = None,
     ) -> dict:
         if not settings.substrate_enabled:
             cmd = [sys.executable, "-m", "storybook.runner", "--session-id", name]
             if resume:
                 cmd.append("--resume")
-            proc = subprocess.Popen(cmd)
+            env = os.environ.copy()
+            if user_email:
+                env["ASP_USER_EMAIL"] = user_email
+            if downscoped_token:
+                env["GCS_DOWNSCOPED_TOKEN"] = downscoped_token
+            proc = subprocess.Popen(cmd, env=env)
             self._local_procs[name] = proc
             return {"name": name, "atespace": atespace, "state": "ACTOR_STATE_RUNNING"}
 
@@ -161,7 +168,16 @@ class SubstrateClient:
             except grpc.RpcError as exc:
                 log.warning("Pre-create check for actor %s/%s: %s", atespace, name, exc)
 
-            # 3. Create Actor from ActorTemplate
+            # 3. Create Actor from ActorTemplate with user/session credential metadata
+            annotations: dict[str, str] = {}
+            actor_env: dict[str, str] = {}
+            if user_email:
+                annotations["asp.storybook/user-email"] = user_email
+                actor_env["ASP_USER_EMAIL"] = user_email
+            if downscoped_token:
+                annotations["asp.storybook/gcs-downscoped-token"] = downscoped_token
+                actor_env["GCS_DOWNSCOPED_TOKEN"] = downscoped_token
+
             t_create = time.monotonic()
             stub.CreateActor(
                 ateapi_pb2.CreateActorRequest(
@@ -169,11 +185,13 @@ class SubstrateClient:
                         metadata=ateapi_pb2.ResourceMetadata(
                             atespace=atespace,
                             name=name,
+                            annotations=annotations,
                         ),
                         actor_template=ateapi_pb2.ObjectRef(
                             atespace=atespace,
                             name=template,
                         ),
+                        env=actor_env,
                     )
                 ),
                 timeout=30.0,
@@ -241,6 +259,8 @@ class SubstrateClient:
         atespace: str = "asp",
         name: str = "",
         resume: bool = False,
+        user_email: str = "",
+        downscoped_token: str | None = None,
     ) -> dict:
         """Create and resume a dedicated Substrate Actor for the given session."""
         return await asyncio.to_thread(
@@ -249,6 +269,8 @@ class SubstrateClient:
             atespace,
             name,
             resume,
+            user_email,
+            downscoped_token,
         )
 
     def _stop_actor_sync(self, name: str, atespace: str) -> bool:
