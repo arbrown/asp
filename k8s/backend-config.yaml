@@ -5,3 +5,8 @@ metadata:
   namespace: default
 spec:
   timeoutSec: 3600
+  iap:
+    enabled: true
+    oauthclientCredentials:
+      secretName: storybook-iap-secret
+

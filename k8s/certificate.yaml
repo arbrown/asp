@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   domains:
-    - pushkin-agent.duckdns.org
+    - ${APP_DOMAIN}
 ---
 apiVersion: networking.gke.io/v1beta1
 kind: FrontendConfig
