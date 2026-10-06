@@ -69,6 +69,7 @@ export interface SessionSummary {
 }
 
 export interface ProgressEvent {
+  seq?: number;
   stage: string;
   pct?: number;
   message?: string;
@@ -195,20 +196,82 @@ export function streamSession(
   onEvent: (e: ProgressEvent) => void,
   onDone: () => void
 ): () => void {
-  const es = new EventSource(`${BASE}/sessions/${id}/stream`, {
-    withCredentials: true,
-  });
-  es.onmessage = (msg) => {
-    const data: ProgressEvent = JSON.parse(msg.data);
-    onEvent(data);
-    if (data.stage === "done" || data.stage === "error") {
-      es.close();
-      onDone();
+  let es: EventSource | null = null;
+  let reconnectTimer: number | null = null;
+  let closed = false;
+  let lastSeq = -1;
+
+  function cleanup() {
+    closed = true;
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
     }
-  };
-  es.onerror = () => {
-    es.close();
-    onDone();
-  };
-  return () => es.close();
+    if (es) {
+      es.close();
+      es = null;
+    }
+  }
+
+  function scheduleReconnect(delayMs = 2000) {
+    if (closed || reconnectTimer !== null) return;
+    if (es) {
+      es.close();
+      es = null;
+    }
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      if (!closed) connect();
+    }, delayMs);
+  }
+
+  function connect() {
+    if (closed) return;
+    const source = new EventSource(`${BASE}/sessions/${id}/stream`, {
+      withCredentials: true,
+    });
+    es = source;
+
+    source.onmessage = (msg) => {
+      if (closed) return;
+      const data: ProgressEvent = JSON.parse(msg.data);
+      if (typeof data.seq === "number") {
+        if (data.seq <= lastSeq) return;
+        lastSeq = data.seq;
+      }
+      onEvent(data);
+      if (data.stage === "done" || data.stage === "error") {
+        cleanup();
+        onDone();
+      }
+    };
+
+    source.onerror = async () => {
+      if (closed) return;
+      try {
+        const session = await getSession(id);
+        if (closed) return;
+        if (session.current_stage === "done" || session.current_stage === "error") {
+          onEvent({
+            stage: session.current_stage,
+            pct: session.progress_pct,
+            message:
+              session.current_stage === "error"
+                ? session.errors?.[0] || "Pipeline failed"
+                : undefined,
+            adapted_from_source: session.adapted_from_source,
+          });
+          cleanup();
+          onDone();
+          return;
+        }
+      } catch {
+        // Transient network error while checking session status — keep reconnecting
+      }
+      scheduleReconnect(2000);
+    };
+  }
+
+  connect();
+  return cleanup;
 }

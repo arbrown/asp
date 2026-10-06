@@ -476,3 +476,44 @@ async def test_fine_grained_429_retry():
         assert items == ["success-item"]
         assert call_count == 3
         assert mock_sleep.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_session_emits_keepalive_while_ongoing():
+    """Verify stream_session yields ': keepalive\\n\\n' during idle poll cycles while work is ongoing."""
+    from unittest.mock import AsyncMock, patch
+    from storybook.api.auth import AuthenticatedUser
+    from storybook.api.routes import stream_session
+    from storybook.models import PipelineState, SessionConfig, SourceConfig
+
+    sid = "sess-keepalive-test"
+    state = PipelineState(
+        session_id=sid,
+        user_email="mofi@google.com",
+        config=SessionConfig(source=SourceConfig(title="Sleepy Hollow", author="Irving")),
+        current_stage="adapting_text",
+        progress_pct=25,
+    )
+    poll_responses = [
+        ([{"seq": 0, "stage": "adapting_text", "pct": 25}], False),
+        ([{"seq": 0, "stage": "adapting_text", "pct": 25}], False),
+        ([{"seq": 0, "stage": "adapting_text", "pct": 25}, {"seq": 1, "stage": "done", "pct": 100}], True),
+    ]
+
+    with patch("storybook.api.routes._require_session", new_callable=AsyncMock, return_value=state), \
+         patch("storybook.api.routes.gcs.load_progress_events", side_effect=poll_responses), \
+         patch("storybook.api.routes.ate.stop_actor", new_callable=AsyncMock), \
+         patch("storybook.api.routes.asyncio.sleep", new_callable=AsyncMock):
+        resp = await stream_session(
+            sid,
+            user=AuthenticatedUser(email="mofi@google.com", auth_type="iap"),
+        )
+        assert resp.headers.get("connection") == "keep-alive"
+        chunks = [chunk async for chunk in resp.body_iterator]
+
+    assert chunks[0].startswith("data: ")
+    assert '"pct": 25' in chunks[0]
+    assert chunks[1] == ": keepalive\n\n"
+    assert chunks[2].startswith("data: ")
+    assert '"stage": "done"' in chunks[2]
+

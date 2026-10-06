@@ -651,17 +651,23 @@ async def stream_session(
                 events, is_done = await asyncio.to_thread(
                     gcs.load_progress_events, session_id
                 )
+            emitted = False
             for idx, ev in enumerate(events):
                 seq = int(ev.get("seq", idx))
                 if seq <= cursor:
                     continue
                 cursor = seq
+                emitted = True
                 yield f"data: {json.dumps(ev)}\n\n"
             if is_done:
                 asyncio.create_task(
                     ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
                 )
                 break
+            if not emitted:
+                # Send SSE comment heartbeat to keep proxies/load balancers/browsers
+                # from closing the connection during long LLM stages.
+                yield ": keepalive\n\n"
             await asyncio.sleep(1.0)
 
     return StreamingResponse(
@@ -669,6 +675,7 @@ async def stream_session(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
