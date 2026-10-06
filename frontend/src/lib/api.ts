@@ -70,6 +70,7 @@ export interface SessionSummary {
 
 export interface ProgressEvent {
   seq?: number;
+  ts?: string;
   stage: string;
   pct?: number;
   message?: string;
@@ -167,6 +168,16 @@ export async function getSession(id: string): Promise<SessionSummary> {
   return res.json();
 }
 
+export async function cancelSession(id: string): Promise<SessionSummary> {
+  const res = await fetch(`${BASE}/sessions/${id}/cancel`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function resumeSession(id: string): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions/${id}/resume`, {
     method: "POST",
@@ -213,7 +224,7 @@ export function streamSession(
     }
   }
 
-  function scheduleReconnect(delayMs = 2000) {
+  function scheduleReconnect(delayMs = 1000) {
     if (closed || reconnectTimer !== null) return;
     if (es) {
       es.close();
@@ -227,7 +238,7 @@ export function streamSession(
 
   function connect() {
     if (closed) return;
-    const source = new EventSource(`${BASE}/sessions/${id}/stream`, {
+    const source = new EventSource(`${BASE}/sessions/${id}/stream?last_seq=${lastSeq}`, {
       withCredentials: true,
     });
     es = source;
@@ -268,10 +279,11 @@ export function streamSession(
       } catch {
         // Transient network error while checking session status — keep reconnecting
       }
-      scheduleReconnect(2000);
+      scheduleReconnect(1000);
     };
   }
 
   connect();
   return cleanup;
 }
+

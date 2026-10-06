@@ -8,7 +8,7 @@ import random
 from datetime import datetime, timezone
 from typing import AsyncIterator, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -465,30 +465,73 @@ def _verify_session_owner(state: PipelineState, user_email: Optional[str]) -> No
         )
 
 
+async def _load_progress_events_Compat(
+    session_id: str,
+    user_email: Optional[str] = None,
+) -> tuple[list[dict], bool]:
+    try:
+        return await asyncio.to_thread(gcs.load_progress_events, session_id, user_email)
+    except TypeError:
+        return await asyncio.to_thread(gcs.load_progress_events, session_id)
+
+
+async def _save_progress_events_Compat(
+    session_id: str,
+    events: list[dict],
+    is_done: bool = False,
+    user_email: Optional[str] = None,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            gcs.save_progress_events, session_id, events, is_done, user_email
+        )
+    except TypeError:
+        await asyncio.to_thread(gcs.save_progress_events, session_id, events, is_done)
+
+
+async def _load_session_state(
+    session_id: str,
+    user_email: Optional[str] = None,
+    prefer_gcs: bool = True,
+) -> Optional[PipelineState]:
+    """Load session state from GCS checkpoint or rqlite."""
+    state: Optional[PipelineState] = None
+    if prefer_gcs:
+        try:
+            try:
+                state = await asyncio.to_thread(gcs.load_pipeline_state, session_id, user_email)
+            except TypeError:
+                state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
+        except Exception:
+            log.debug("Could not load state.json from GCS for %s", session_id)
+    if state is None:
+        try:
+            state = await store.get_session(session_id, user_email=user_email)
+        except HTTPException:
+            raise
+        except TypeError:
+            state = await store.get_session(session_id)
+        except Exception:
+            log.exception("DB unavailable for session %s", session_id)
+    if state is None and not prefer_gcs:
+        try:
+            try:
+                state = await asyncio.to_thread(gcs.load_pipeline_state, session_id, user_email)
+            except TypeError:
+                state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
+        except Exception:
+            log.debug("Could not load state.json from GCS for %s", session_id)
+    return state
+
+
 async def _require_session(
     session_id: str,
     user_email: Optional[str] = None,
+    prefer_gcs: bool = True,
 ) -> PipelineState:
-    state: Optional[PipelineState] = None
-    try:
-        state = await asyncio.to_thread(gcs.load_pipeline_state, session_id, user_email)
-    except TypeError:
-        # Backwards-compatibility if a unit test mocks load_pipeline_state(sid) with 1 arg
-        state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
-
-    if state is not None:
-        _verify_session_owner(state, user_email)
-        return state
-
-    try:
-        state = await store.get_session(session_id, user_email=user_email)
-    except HTTPException:
-        raise
-    except TypeError:
-        state = await store.get_session(session_id)
-    except Exception:
-        log.exception("DB unavailable for session %s", session_id)
-
+    state = await _load_session_state(
+        session_id, user_email=user_email, prefer_gcs=prefer_gcs
+    )
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -496,8 +539,10 @@ async def _require_session(
     return state
 
 
-def _to_session_response(state: PipelineState) -> SessionResponse:
+def _to_session_response(state: PipelineState, is_running: Optional[bool] = None) -> SessionResponse:
     sid = state.session_id
+    if is_running is None:
+        is_running = state.current_stage not in ("done", "error", "cancelled")
     return SessionResponse(
         session_id=sid,
         user_email=getattr(state, "user_email", None),
@@ -508,7 +553,8 @@ def _to_session_response(state: PipelineState) -> SessionResponse:
         wide_pdf_url=f"/api/v1/sessions/{sid}/pdf/wide" if state.wide_pdf_gcs_uri else None,
         trace_url=state.trace_url or None,
         errors=state.errors,
-        resumable=state.current_stage == "error",
+        resumable=state.current_stage in ("error", "cancelled")
+        or (state.current_stage != "done" and not is_running),
         started_at=state.started_at,
         finished_at=state.finished_at,
         adapted_from_source=state.adapted_from_source,
@@ -574,20 +620,38 @@ async def create_session(
     sid = state.session_id
 
     await _persist_session(state, user_email=resolved_user.email)
-    try:
-        await asyncio.to_thread(gcs.save_progress_events, sid, [], False, resolved_user.email)
-    except TypeError:
-        await asyncio.to_thread(gcs.save_progress_events, sid, [], False)
+    await _save_progress_events_Compat(sid, [], False, resolved_user.email)
 
     downscoped_token = await _mint_actor_token(resolved_user.email, sid)
-    await ate.create_actor(
-        template=settings.substrate_template,
-        atespace=settings.substrate_atespace,
-        name=sid,
-        user_email=resolved_user.email,
-        downscoped_token=downscoped_token,
-    )
-    return _to_session_response(state)
+    try:
+        actor_info = await ate.create_actor(
+            template=settings.substrate_template,
+            atespace=settings.substrate_atespace,
+            name=sid,
+            resume=False,
+            user_email=resolved_user.email,
+            downscoped_token=downscoped_token,
+        )
+        log.info(
+            "Provisioned Substrate Actor for session %s: %s",
+            sid,
+            actor_info,
+        )
+    except Exception as exc:
+        log.exception("Failed to provision Substrate Actor for session %s", sid)
+        state.current_stage = "error"
+        state.finished_at = _now()
+        state.errors.append(f"Failed to provision Substrate Actor: {exc}")
+        await _persist_session(state, user_email=resolved_user.email)
+        await _save_progress_events_Compat(
+            sid,
+            [{"stage": "error", "pct": 0, "message": str(exc), "seq": 0, "ts": _now()}],
+            True,
+            resolved_user.email,
+        )
+        raise HTTPException(status_code=500, detail=f"Actor provisioning failed: {exc}")
+
+    return _to_session_response(state, is_running=True)
 
 
 @router.post("/sessions/{session_id}/cancel", response_model=SessionResponse)
@@ -596,16 +660,34 @@ async def cancel_session(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SessionResponse:
     resolved_user = _resolve_user(user)
-    state = await _require_session(session_id, user_email=resolved_user.email)
+    state = await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
+
     await ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
 
     if state.current_stage != "done":
         state.current_stage = "error"
         state.finished_at = _now()
-        state.errors.append("Cancelled by user")
+        if "Cancelled by user" not in state.errors:
+            state.errors.append("Cancelled by user")
         await _persist_session(state, user_email=resolved_user.email)
 
-    return _to_session_response(state)
+        events, _ = await _load_progress_events_Compat(session_id, resolved_user.email)
+        events.append(
+            {
+                "stage": "error",
+                "pct": state.progress_pct,
+                "message": "Cancelled by user",
+                "seq": len(events),
+                "ts": _now(),
+            }
+        )
+        await _save_progress_events_Compat(
+            session_id, events, True, resolved_user.email
+        )
+
+    return _to_session_response(state, is_running=False)
 
 
 @router.post("/sessions/{session_id}/resume", response_model=SessionResponse, status_code=202)
@@ -614,60 +696,162 @@ async def resume_session(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SessionResponse:
     resolved_user = _resolve_user(user)
-    state = await _require_session(session_id, user_email=resolved_user.email)
+    state = await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
+
+    if await ate.is_actor_running(name=session_id, atespace=settings.substrate_atespace):
+        raise HTTPException(status_code=409, detail="Session actor is still running")
+
     state.errors = []
     state.current_stage = "resuming"
     state.finished_at = None
 
     await _persist_session(state, user_email=resolved_user.email)
-    downscoped_token = await _mint_actor_token(resolved_user.email, session_id)
-    await ate.create_actor(
-        template=settings.substrate_template,
-        atespace=settings.substrate_atespace,
-        name=session_id,
-        resume=True,
-        user_email=resolved_user.email,
-        downscoped_token=downscoped_token,
+    await _save_progress_events_Compat(
+        session_id,
+        [
+            {
+                "stage": "resuming",
+                "pct": state.progress_pct or 5,
+                "message": "Resuming session on new Substrate Actor",
+                "seq": 0,
+                "ts": _now(),
+            }
+        ],
+        False,
+        resolved_user.email,
     )
-    return _to_session_response(state)
+
+    downscoped_token = await _mint_actor_token(resolved_user.email, session_id)
+    try:
+        actor_info = await ate.create_actor(
+            template=settings.substrate_template,
+            atespace=settings.substrate_atespace,
+            name=session_id,
+            resume=True,
+            user_email=resolved_user.email,
+            downscoped_token=downscoped_token,
+        )
+        log.info(
+            "Provisioned resumed Substrate Actor for session %s: %s",
+            session_id,
+            actor_info,
+        )
+    except Exception as exc:
+        log.exception("Failed to provision resumed Substrate Actor for session %s", session_id)
+        state.current_stage = "error"
+        state.finished_at = _now()
+        state.errors.append(f"Failed to resume Substrate Actor: {exc}")
+        await _persist_session(state, user_email=resolved_user.email)
+        raise HTTPException(status_code=500, detail=f"Actor resume failed: {exc}")
+
+    return _to_session_response(state, is_running=True)
 
 
 @router.get("/sessions/{session_id}/stream")
 async def stream_session(
     session_id: str,
+    last_seq: int = Query(default=-1, description="Last event sequence number received"),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> StreamingResponse:
     resolved_user = _resolve_user(user)
-    await _require_session(session_id, user_email=resolved_user.email)
+    await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
+
+    initial_cursor = last_seq if isinstance(last_seq, int) else -1
+    if isinstance(last_event_id, str):
+        try:
+            initial_cursor = max(initial_cursor, int(last_event_id))
+        except ValueError:
+            pass
 
     async def event_generator() -> AsyncIterator[str]:
-        cursor = -1
+        cursor = initial_cursor
+        ticks = 0
         while True:
-            try:
-                events, is_done = await asyncio.to_thread(
-                    gcs.load_progress_events, session_id, resolved_user.email
-                )
-            except TypeError:
-                events, is_done = await asyncio.to_thread(
-                    gcs.load_progress_events, session_id
-                )
+            events, is_done = await _load_progress_events_Compat(
+                session_id, resolved_user.email
+            )
             emitted = False
+            emitted_terminal = False
             for idx, ev in enumerate(events):
                 seq = int(ev.get("seq", idx))
                 if seq <= cursor:
                     continue
                 cursor = seq
                 emitted = True
-                yield f"data: {json.dumps(ev)}\n\n"
-            if is_done:
+                payload = dict(ev)
+                payload["seq"] = seq
+                yield f"id: {seq}\ndata: {json.dumps(payload)}\n\n"
+                if payload.get("stage") in ("done", "error"):
+                    emitted_terminal = True
+
+            if is_done or emitted_terminal:
+                # Reclaim actor resources in the background once terminal
                 asyncio.create_task(
                     ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
                 )
                 break
+
+            ticks += 1
+            # Every ~4s check whether the actor died unexpectedly mid-pipeline
+            if ticks % 4 == 0:
+                actor = await ate.get_actor(
+                    name=session_id, atespace=settings.substrate_atespace
+                )
+                actor_state = (actor or {}).get("state", "")
+                if actor is None or actor_state in (
+                    "ACTOR_STATE_CRASHED",
+                    "ACTOR_STATE_SUSPENDED",
+                    "ACTOR_STATE_DELETING",
+                ):
+                    # Re-check GCS events/state once to avoid racing normal completion
+                    await asyncio.sleep(0.5)
+                    latest_events, latest_done = await _load_progress_events_Compat(
+                        session_id, resolved_user.email
+                    )
+                    if latest_done or any(
+                        e.get("stage") in ("done", "error") for e in latest_events
+                    ):
+                        continue
+                    latest_state = await _load_session_state(
+                        session_id, user_email=resolved_user.email, prefer_gcs=True
+                    )
+                    if latest_state and latest_state.current_stage not in ("done", "error"):
+                        err_msg = (
+                            f"Actor terminated unexpectedly ({actor_state or 'DELETED'}) "
+                            f"at stage '{latest_state.current_stage}'"
+                        )
+                        log.warning("Session %s: %s", session_id, err_msg)
+                        latest_state.current_stage = "error"
+                        latest_state.finished_at = _now()
+                        latest_state.errors.append(err_msg)
+                        await _persist_session(
+                            latest_state, user_email=resolved_user.email
+                        )
+                        err_seq = len(latest_events)
+                        err_ev = {
+                            "stage": "error",
+                            "pct": latest_state.progress_pct,
+                            "message": err_msg,
+                            "seq": err_seq,
+                            "ts": _now(),
+                        }
+                        latest_events.append(err_ev)
+                        await _save_progress_events_Compat(
+                            session_id, latest_events, True, resolved_user.email
+                        )
+                        yield f"id: {err_seq}\ndata: {json.dumps(err_ev)}\n\n"
+                        break
+
             if not emitted:
                 # Send SSE comment heartbeat to keep proxies/load balancers/browsers
                 # from closing the connection during long LLM stages.
                 yield ": keepalive\n\n"
+
             await asyncio.sleep(1.0)
 
     return StreamingResponse(
@@ -687,8 +871,22 @@ async def get_session(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SessionResponse:
     resolved_user = _resolve_user(user)
-    state = await _require_session(session_id, user_email=resolved_user.email)
-    return _to_session_response(state)
+    state = await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
+    is_running = False
+    if state.current_stage not in ("done", "error", "cancelled"):
+        is_running = await ate.is_actor_running(
+            name=session_id, atespace=settings.substrate_atespace
+        )
+        if not is_running:
+            # Refresh from GCS in case the actor just completed
+            refreshed = await _load_session_state(
+                session_id, user_email=resolved_user.email, prefer_gcs=True
+            )
+            if refreshed is not None:
+                state = refreshed
+    return _to_session_response(state, is_running=is_running)
 
 
 @router.get("/sessions/{session_id}/pages/{page_number}/html")
@@ -756,12 +954,17 @@ async def download_pdf(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Response:
     resolved_user = _resolve_user(user)
-    state = await _require_session(session_id, user_email=resolved_user.email)
+    state = await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
     if not state.pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="PDF not ready")
-    data, content_type = gcs.read_blob(
-        session_id, "final", "storybook.pdf", user_email=resolved_user.email
-    )
+    try:
+        data, _ = gcs.read_blob(
+            session_id, "final", "storybook.pdf", user_email=resolved_user.email
+        )
+    except TypeError:
+        data, _ = gcs.read_blob(session_id, "final", "storybook.pdf")
     return Response(
         content=data,
         media_type="application/pdf",
@@ -835,12 +1038,17 @@ async def download_wide_pdf(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Response:
     resolved_user = _resolve_user(user)
-    state = await _require_session(session_id, user_email=resolved_user.email)
+    state = await _require_session(
+        session_id, user_email=resolved_user.email, prefer_gcs=True
+    )
     if not state.wide_pdf_gcs_uri:
         raise HTTPException(status_code=404, detail="Wide PDF not ready")
-    data, content_type = gcs.read_blob(
-        session_id, "final", "storybook_wide.pdf", user_email=resolved_user.email
-    )
+    try:
+        data, _ = gcs.read_blob(
+            session_id, "final", "storybook_wide.pdf", user_email=resolved_user.email
+        )
+    except TypeError:
+        data, _ = gcs.read_blob(session_id, "final", "storybook_wide.pdf")
     return Response(
         content=data,
         media_type="application/pdf",
@@ -866,3 +1074,4 @@ async def list_sessions_route(
         user_email=resolved_user.email,
     )
     return [_to_session_response(s) for s in states]
+

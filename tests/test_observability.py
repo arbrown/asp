@@ -511,9 +511,9 @@ async def test_stream_session_emits_keepalive_while_ongoing():
         assert resp.headers.get("connection") == "keep-alive"
         chunks = [chunk async for chunk in resp.body_iterator]
 
-    assert chunks[0].startswith("data: ")
+    assert chunks[0].startswith("id: 0\ndata: ")
     assert '"pct": 25' in chunks[0]
     assert chunks[1] == ": keepalive\n\n"
-    assert chunks[2].startswith("data: ")
+    assert chunks[2].startswith("id: 1\ndata: ")
     assert '"stage": "done"' in chunks[2]
 

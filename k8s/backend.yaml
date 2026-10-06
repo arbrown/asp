@@ -15,7 +15,7 @@ metadata:
   labels:
     app: storybook-backend
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: storybook-backend
@@ -120,3 +120,4 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+

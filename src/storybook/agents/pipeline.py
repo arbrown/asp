@@ -470,10 +470,14 @@ async def _finalize_bible(
 
 async def run_pipeline(
     state: PipelineState,
-    progress_queue: asyncio.Queue,
+    progress_queue: Any = None,
     resume: bool = False,
 ) -> PipelineState:
     """Execute the full storybook pipeline. Writes progress events to progress_queue."""
+    if progress_queue is None:
+        from storybook.events import GCSProgressSink
+
+        progress_queue = GCSProgressSink(state.session_id, state)
 
     tracer = get_tracer()
     with tracer.start_as_current_span(
@@ -492,7 +496,7 @@ async def run_pipeline(
 
 async def _run_pipeline(
     state: PipelineState,
-    progress_queue: asyncio.Queue,
+    progress_queue: Any,
     resume: bool = False,
 ) -> PipelineState:
 
@@ -511,21 +515,30 @@ async def _run_pipeline(
 
     if resume:
         try:
-            story = await asyncio.to_thread(gcs.load_adapted_story, sid)
-            state.adapted_text = story.get("adapted_text", "")
+            if not state.adapted_text:
+                story = await asyncio.to_thread(gcs.load_adapted_story, sid)
+                state.adapted_text = story.get("adapted_text", "")
             await emit("fetching", 10, message="Loaded source from previous run")
             await emit("adapting_text", 35, message="Loaded adapted story from previous run")
 
-            spread_contents = await asyncio.to_thread(gcs.load_spread_contents, sid)
-            state.spread_contents = spread_contents
-            await emit("adapting_text", 35, message=f"Loaded {len(spread_contents)} spreads")
+            if not state.spread_contents:
+                spread_contents = await asyncio.to_thread(gcs.load_spread_contents, sid)
+                state.spread_contents = spread_contents
+            await emit("adapting_text", 35, message=f"Loaded {len(state.spread_contents)} spreads")
 
-            bible_dict = await asyncio.to_thread(gcs.load_character_bible, sid)
-            state.character_bible = bible_dict  # type: ignore[assignment]
+            if state.character_bible is not None:
+                bible_dict = (
+                    state.character_bible.model_dump()
+                    if hasattr(state.character_bible, "model_dump")
+                    else dict(state.character_bible)  # type: ignore[arg-type]
+                )
+            else:
+                bible_dict = await asyncio.to_thread(gcs.load_character_bible, sid)
+                state.character_bible = bible_dict  # type: ignore[assignment]
             await emit(
                 "building_character_bible", 40, message="Loaded character bible from previous run"
             )
-            log.info("Resume: loaded stages 1-4 from GCS for session %s", sid)
+            log.info("Resume: loaded stages 1-3 from GCS for session %s", sid)
         except Exception as exc:
             log.warning("Resume: could not load GCS artifacts (%s) — re-running stages 1-4", exc)
             resume = False
@@ -833,6 +846,14 @@ async def _run_pipeline(
         state.character_bible = bible_dict  # type: ignore[assignment]
         await emit("planning_spreads", 43, message="Character bible and spread plan ready")
 
+    elif state.layout_spec and state.spread_plans:
+        # ── 4 (resume). Layout spec and spread plans already in state.json ────
+        log.info(
+            "Resume: loaded existing layout_spec and %d spread_plans from state checkpoint for session %s",
+            len(state.spread_plans),
+            sid,
+        )
+        planner_output = None
     else:
         # ── 4 (resume). Spread planner only — bible already loaded from GCS ────
         with trace_stage("stage.spread_planner", session_id=sid):
@@ -865,25 +886,29 @@ async def _run_pipeline(
                 len(planner_output.get("spreads", [])),
             )
 
-    layout_spec = {
-        "font_family": planner_output.get("font_family", "Georgia, serif"),
-        "background_color": planner_output.get("background_color", "#fffdf7"),
-        "text_color": planner_output.get("text_color", "#1a1a1a"),
-        "accent_color": planner_output.get("accent_color", "#2c1a0e"),
-        "layout_notes": planner_output.get("layout_notes", ""),
-    }
-    state.layout_spec = layout_spec
+    if planner_output is not None:
+        layout_spec = {
+            "font_family": planner_output.get("font_family", "Georgia, serif"),
+            "background_color": planner_output.get("background_color", "#fffdf7"),
+            "text_color": planner_output.get("text_color", "#1a1a1a"),
+            "accent_color": planner_output.get("accent_color", "#2c1a0e"),
+            "layout_notes": planner_output.get("layout_notes", ""),
+        }
+        state.layout_spec = layout_spec
 
-    spread_plans_raw = planner_output.get("spreads", [])
-    state.spread_plans = [
-        SpreadPlan(
-            spread_number=sp["spread_number"],
-            illustration_plan=[IllustrationEntry(**e) for e in sp.get("illustration_plan", [])],
-            text_treatment=sp.get("text_treatment", "gradient_dark"),
-            text_position=sp.get("text_position", "bottom"),
-        )
-        for sp in spread_plans_raw
-    ]
+        spread_plans_raw = planner_output.get("spreads", [])
+        state.spread_plans = [
+            SpreadPlan(
+                spread_number=sp["spread_number"],
+                illustration_plan=[IllustrationEntry(**e) for e in sp.get("illustration_plan", [])],
+                text_treatment=sp.get("text_treatment", "gradient_dark"),
+                text_position=sp.get("text_position", "bottom"),
+            )
+            for sp in spread_plans_raw
+        ]
+    else:
+        layout_spec = dict(state.layout_spec)
+
     plan_by_spread = {sp.spread_number: sp for sp in state.spread_plans}
 
     log.info("Spread planner: %s", layout_spec)
@@ -1127,6 +1152,11 @@ async def _run_pipeline(
                         ref_ready.set()
 
                 completed_spread_images[s] = image_bytes_by_index.get(0, b"")
+
+                if resume and await asyncio.to_thread(gcs.spread_html_exists, sid, s):
+                    log.info("Resume: loaded existing HTML for spread %d", s)
+                    await _bump(s, render_w, "cached")
+                    return s, image_bytes_by_index
 
                 spread_html = await _render_and_verify_spread(
                     s, spread_content, illustration_plan, image_bytes_by_index
