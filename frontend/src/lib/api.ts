@@ -43,6 +43,8 @@ export interface ProgressEvent {
   attempt?: number;
   reason?: string;
   adapted_from_source?: boolean;
+  seq?: number;
+  ts?: string;
 }
 
 export interface LuckyConfig {
@@ -121,6 +123,12 @@ export async function getSession(id: string): Promise<SessionSummary> {
   return res.json();
 }
 
+export async function cancelSession(id: string): Promise<SessionSummary> {
+  const res = await fetch(`${BASE}/sessions/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function resumeSession(id: string): Promise<SessionSummary> {
   const res = await fetch(`${BASE}/sessions/${id}/resume`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
@@ -143,18 +151,41 @@ export function streamSession(
   onEvent: (e: ProgressEvent) => void,
   onDone: () => void
 ): () => void {
-  const es = new EventSource(`${BASE}/sessions/${id}/stream`);
-  es.onmessage = (msg) => {
-    const data: ProgressEvent = JSON.parse(msg.data);
-    onEvent(data);
-    if (data.stage === "done" || data.stage === "error") {
-      es.close();
-      onDone();
-    }
+  let lastSeq = -1;
+  let closed = false;
+  let es: EventSource | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const connect = () => {
+    if (closed) return;
+    es = new EventSource(`${BASE}/sessions/${id}/stream?last_seq=${lastSeq}`);
+    es.onmessage = (msg) => {
+      const data: ProgressEvent = JSON.parse(msg.data);
+      if (data.seq !== undefined) {
+        if (data.seq <= lastSeq) return;
+        lastSeq = data.seq;
+      }
+      onEvent(data);
+      if (data.stage === "done" || data.stage === "error") {
+        closed = true;
+        es?.close();
+        onDone();
+      }
+    };
+    es.onerror = () => {
+      es?.close();
+      if (!closed) {
+        retryTimer = setTimeout(connect, 1000);
+      }
+    };
   };
-  es.onerror = () => {
-    es.close();
-    onDone();
+
+  connect();
+
+  return () => {
+    closed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    es?.close();
   };
-  return () => es.close();
 }
+

@@ -15,7 +15,7 @@ metadata:
   labels:
     app: storybook-backend
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: storybook-backend
@@ -44,29 +44,33 @@ spec:
             - name: GOOGLE_CLOUD_LOCATION
               value: "global"
             - name: RQLITE_URL
-              value: "http://rqlite:4001"
+              value: "http://rqlite.default.svc.cluster.local:4001"
             - name: SUBSTRATE_ENABLED
-              value: "1"
+              value: "true"
             - name: SUBSTRATE_API_ADDR
               value: "api.ate-system.svc:443"
             - name: SUBSTRATE_ATESPACE
               value: "asp"
             - name: SUBSTRATE_TEMPLATE
               value: "asp-runner"
+            - name: SUBSTRATE_CA_FILE
+              value: "/run/servicedns-ca/ca.crt"
+            - name: SUBSTRATE_CRED_BUNDLE
+              value: "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
           volumeMounts:
-            - name: ate-ca
-              mountPath: /var/run/secrets/ate.dev/ca
+            - name: servicedns-ca
+              mountPath: /run/servicedns-ca
               readOnly: true
-            - name: client-cert
-              mountPath: /var/run/secrets/ate.dev/client-cert
+            - name: podidentity
+              mountPath: /run/podidentity.podcert.ate.dev
               readOnly: true
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "250m"
+              memory: "512Mi"
             limits:
-              cpu: "2"
-              memory: "4Gi"
+              cpu: "1"
+              memory: "1Gi"
           readinessProbe:
             httpGet:
               path: /healthz
@@ -80,16 +84,22 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
       volumes:
-        - name: ate-ca
-          configMap:
-            name: ate-root-ca.crt
-        - name: client-cert
+        - name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.crt
+        - name: podidentity
           projected:
             sources:
               - podCertificate:
-                  signerName: ate.dev/pod-identity
+                  signerName: podidentity.podcert.ate.dev/identity
                   keyType: ECDSAP256
-                  credentialBundlePath: tls-combined.pem
+                  credentialBundlePath: credential-bundle.pem
 ---
 apiVersion: v1
 kind: Service
@@ -104,3 +114,4 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+

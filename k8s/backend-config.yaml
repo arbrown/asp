@@ -3,5 +3,5 @@ kind: BackendConfig
 metadata:
   name: storybook-backend-config
   namespace: default
-spec:
-  timeoutSec: 3600
+spec: {}
+
