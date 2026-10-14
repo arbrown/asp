@@ -56,6 +56,7 @@ async def test_routes_create_cancel_resume_actor_lifecycle():
     with patch("storybook.api.routes.gcs.save_pipeline_state", return_value="gs://b/state.json"), \
          patch("storybook.api.routes.gcs.save_progress_events", return_value="gs://b/events.json"), \
          patch("storybook.api.routes.store.upsert_session", new_callable=AsyncMock), \
+         patch("storybook.api.routes._mint_actor_token", new_callable=AsyncMock, return_value="downscoped-tok"), \
          patch("storybook.api.routes.ate.create_actor", new_callable=AsyncMock) as mock_create, \
          patch("storybook.api.routes.ate.stop_actor", new_callable=AsyncMock) as mock_stop, \
          patch("storybook.api.routes.ate.is_actor_running", new_callable=AsyncMock) as mock_running:
@@ -67,10 +68,12 @@ async def test_routes_create_cancel_resume_actor_lifecycle():
             atespace="asp",
             name=sid,
             resume=False,
+            user_email="drewbr@google.com",
+            downscoped_token="downscoped-tok",
         )
 
         # Cancel session -> calls ate.stop_actor
-        state = PipelineState(session_id=sid, config=cfg, current_stage="generating_image", progress_pct=50)
+        state = PipelineState(session_id=sid, user_email="drewbr@google.com", config=cfg, current_stage="generating_image", progress_pct=50)
         with patch("storybook.api.routes.gcs.load_pipeline_state", return_value=state), \
              patch("storybook.api.routes.gcs.load_progress_events", return_value=([], False)):
             cancel_resp = await cancel_session(sid)

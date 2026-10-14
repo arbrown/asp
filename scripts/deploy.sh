@@ -18,12 +18,16 @@ fi
 PROJECT_ID="${1:-${GCP_PROJECT_ID:?GCP_PROJECT_ID not set in .env or args}}"
 REGION="${2:-${GCP_REGION:-us-central1}}"
 ARTIFACTS_BUCKET="${3:-${GCS_ARTIFACTS_BUCKET:?GCS_ARTIFACTS_BUCKET not set in .env or args}}"
+APP_DOMAIN="${4:-${APP_DOMAIN:?APP_DOMAIN not set in .env or args}}"
+LEGACY_OWNER_EMAIL="${LEGACY_OWNER_EMAIL:-${DEV_DEFAULT_EMAIL:-owner@storybook.local}}"
+DEV_DEFAULT_EMAIL="${DEV_DEFAULT_EMAIL:-${LEGACY_OWNER_EMAIL}}"
 
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/storybook-images"
 
 echo "==> Project:  ${PROJECT_ID}"
 echo "==> Region:   ${REGION}"
 echo "==> Bucket:   ${ARTIFACTS_BUCKET}"
+echo "==> Domain:   ${APP_DOMAIN}"
 echo "==> Registry: ${REGISTRY}"
 echo ""
 
@@ -51,8 +55,11 @@ TMP=$(mktemp -d)
 export GCP_PROJECT_ID="${PROJECT_ID}"
 export GCP_REGION="${REGION}"
 export GCS_ARTIFACTS_BUCKET="${ARTIFACTS_BUCKET}"
+export APP_DOMAIN="${APP_DOMAIN}"
+export LEGACY_OWNER_EMAIL="${LEGACY_OWNER_EMAIL}"
+export DEV_DEFAULT_EMAIL="${DEV_DEFAULT_EMAIL}"
 for f in "${ROOT}/k8s"/*.yaml; do
-  envsubst '${GCP_PROJECT_ID} ${GCP_REGION} ${GCS_ARTIFACTS_BUCKET}' \
+  envsubst '${GCP_PROJECT_ID} ${GCP_REGION} ${GCS_ARTIFACTS_BUCKET} ${APP_DOMAIN} ${LEGACY_OWNER_EMAIL} ${DEV_DEFAULT_EMAIL}' \
     < "$f" > "${TMP}/$(basename "$f")"
 done
 

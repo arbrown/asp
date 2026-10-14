@@ -22,6 +22,7 @@ init_tracing(settings.gcp_project_id)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,6 +41,7 @@ async def _load_from_gcs_and_backfill() -> int:
         try:
             state = PipelineState(
                 session_id=sid,
+                user_email=m.get("user_email", store.LEGACY_OWNER_EMAIL),
                 config=SessionConfig(**m["config"]),
                 current_stage=m.get("current_stage", "unknown"),
                 progress_pct=m.get("progress_pct", 0),
@@ -51,7 +53,7 @@ async def _load_from_gcs_and_backfill() -> int:
                 finished_at=m.get("finished_at"),
                 adapted_from_source=m.get("adapted_from_source", True),
             )
-            await store.upsert_session(state)
+            await store.upsert_session(state, user_email=state.user_email)
             loaded += 1
         except Exception:
             log.warning("Skipping malformed or failed GCS session backfill for %s", sid)
