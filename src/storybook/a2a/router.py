@@ -28,10 +28,14 @@ from storybook.a2a.a2ui import (
     build_studio_surface,
     default_studio_options_for_book,
     ensure_studio_state,
+    format_breadcrumb_trail,
     normalize_config_fields,
 )
 from storybook.a2a.sink import (
+    _VALID_IMAGE_RE,
     DEFAULT_PUBLIC_BASE_URL,
+    _load_spread_captions,
+    _parse_spread_index_from_filename,
     format_jsonrpc_sse,
     get_public_asset_url,
     make_task_artifact_event,
@@ -40,6 +44,7 @@ from storybook.a2a.sink import (
 )
 from storybook.api import routes as api_routes
 from storybook.config import settings
+from storybook.db import store
 from storybook.models import PipelineState, SessionConfig, SourceConfig
 from storybook.substrate import ate
 from storybook.tools import gcs
@@ -200,19 +205,32 @@ async def get_agent_card(request: Request) -> JSONResponse:
 @a2a_router.get("/a2a/sessions/{session_id}/images/{filename}")
 async def get_a2a_session_image(session_id: str, filename: str) -> Response:
     """Serve session reference or spread image bytes for A2UI cards without IAP redirect."""
-    if ".." in filename or "/" in filename:
+    if ".." in filename or "/" in filename or not _VALID_IMAGE_RE.match(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")
     data = gcs.load_image(session_id, filename)
     if data is None:
-        # Support shorthand spread_1.png -> spread_01_img0.png or page_01.png
-        m = re.match(r"^spread_(\d+)\.png$", filename)
+        # Support spread_00_img0.png, spread_1.png, and page_01.png fallbacks
+        m = re.match(r"^spread_(\d+)(?:_img(\d+))?\.png$", filename)
         if m:
             idx = int(m.group(1))
-            for candidate in (
-                f"spread_{idx:02d}_img0.png",
-                f"spread_{idx - 1:02d}_img0.png",
-                f"page_{idx:02d}.png",
-            ):
+            img_idx = int(m.group(2)) if m.group(2) is not None else 0
+            candidates: list[str] = [
+                f"spread_{idx:02d}_img{img_idx}.png",
+                f"spread_{idx:02d}_img{1 - img_idx}.png",
+            ]
+            if m.group(2) is None and idx >= 1:
+                candidates.extend(
+                    [
+                        f"spread_{idx - 1:02d}_img0.png",
+                        f"spread_{idx - 1:02d}_img1.png",
+                        f"page_{idx:02d}.png",
+                    ]
+                )
+            else:
+                candidates.append(f"page_{idx + 1:02d}.png")
+            for candidate in candidates:
+                if candidate == filename:
+                    continue
                 data = gcs.load_image(session_id, candidate)
                 if data is not None:
                     break
@@ -684,6 +702,82 @@ def _build_task_response(
     }
 
 
+_actor_watcher_tasks: set[asyncio.Task[Any]] = set()
+_TERMINAL_STAGES = ("done", "error", "cancelled")
+
+
+async def _reclaim_finished_actors() -> int:
+    """Stop any Substrate actors whose session is already in a terminal stage."""
+    terminal_ids: set[str] = set()
+    try:
+        sessions = await store.list_sessions(limit=50)
+        for s in sessions or []:
+            if getattr(s, "current_stage", "") in _TERMINAL_STAGES and getattr(s, "session_id", ""):
+                terminal_ids.add(str(s.session_id))
+    except Exception as exc:
+        log.debug("Could not list DB sessions during actor reclamation: %s", exc)
+
+    for sid, st in list(_a2a_sessions.items()):
+        if getattr(st, "current_stage", "") in _TERMINAL_STAGES:
+            terminal_ids.add(sid)
+
+    if not terminal_ids:
+        return 0
+
+    async def _stop_one(target_sid: str) -> None:
+        try:
+            await ate.stop_actor(name=target_sid, atespace=settings.substrate_atespace)
+        except Exception as exc:
+            log.debug("Ignoring stop_actor error for finished session %s: %s", target_sid, exc)
+
+    await asyncio.gather(*(_stop_one(sid) for sid in terminal_ids), return_exceptions=True)
+    return len(terminal_ids)
+
+
+async def _watch_and_cleanup_actor(
+    session_id: str,
+    poll_interval: float = 5.0,
+    max_timeout: float = 1800.0,
+) -> None:
+    """Background watcher that stops the Substrate actor once the session finishes or times out."""
+    elapsed = 0.0
+    try:
+        while elapsed < max_timeout:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            try:
+                events, is_done = await asyncio.to_thread(gcs.load_progress_events, session_id)
+            except Exception:
+                events, is_done = [], False
+
+            has_terminal_event = any(
+                isinstance(e, dict) and e.get("stage") in _TERMINAL_STAGES for e in (events or [])
+            )
+            if is_done or has_terminal_event:
+                break
+
+            try:
+                state = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
+            except Exception:
+                state = None
+
+            if state is not None:
+                _a2a_sessions[session_id] = state
+                if state.current_stage in _TERMINAL_STAGES:
+                    break
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.debug("Actor lifecycle watcher for session %s exited with error: %s", session_id, exc)
+    finally:
+        try:
+            await ate.stop_actor(name=session_id, atespace=settings.substrate_atespace)
+            log.info("Reclaimed Substrate actor for finished session %s", session_id)
+        except Exception as exc:
+            log.debug("Background stop_actor for session %s ignored error: %s", session_id, exc)
+
+
 async def _create_and_start_storybook_session(
     cfg_fields: dict[str, Any],
     session_id: str | None = None,
@@ -691,7 +785,7 @@ async def _create_and_start_storybook_session(
 ) -> PipelineState:
     """Create a PipelineState session, persist to DB/GCS, and provision the Substrate actor."""
     norm = normalize_config_fields(cfg_fields, studio_state=studio_state)
-    sid = session_id or str(uuid.uuid4())[:8]
+    sid = session_id or str(uuid.uuid4())
 
     target_age = norm["target_age"]
     try:
@@ -711,15 +805,15 @@ async def _create_and_start_storybook_session(
         custom_instructions=norm["custom_instructions"] or None,
     )
 
+    now_iso = _now()
     state = PipelineState(
         session_id=sid,
         config=config,
         current_stage="initializing",
-        created_at=_now(),
+        started_at=now_iso,
     )
 
     _a2a_sessions[sid] = state
-    
 
     try:
         await asyncio.to_thread(gcs.save_pipeline_state, sid, state)
@@ -732,21 +826,141 @@ async def _create_and_start_storybook_session(
         pass
 
     try:
-        await asyncio.to_thread(gcs.save_progress_events, sid, [], False)
+        await asyncio.to_thread(
+            gcs.save_progress_events,
+            sid,
+            [
+                {
+                    "stage": "initializing",
+                    "pct": 5,
+                    "message": "Initializing session",
+                    "seq": 0,
+                    "ts": now_iso,
+                }
+            ],
+            False,
+        )
     except Exception:
         pass
 
-    try:
-        await ate.create_actor(
-            template=settings.substrate_template,
-            atespace=settings.substrate_atespace,
-            name=sid,
-            resume=False,
-        )
-    except Exception as exc:
-        log.debug("Substrate actor provisioning skipped/failed for session %s: %s", sid, exc)
+    await _reclaim_finished_actors()
 
+    try:
+        try:
+            await ate.create_actor(
+                template=settings.substrate_template,
+                atespace=settings.substrate_atespace,
+                name=sid,
+                resume=False,
+            )
+        except Exception as first_exc:
+            err_text = str(first_exc)
+            if "RESOURCE_EXHAUSTED" in err_text or "no free workers" in err_text.lower():
+                log.warning(
+                    "Worker pool exhausted for session %s (%s); "
+                    "reclaiming finished actors and retrying...",
+                    sid,
+                    first_exc,
+                )
+                await _reclaim_finished_actors()
+                await asyncio.sleep(0.5)
+                await ate.create_actor(
+                    template=settings.substrate_template,
+                    atespace=settings.substrate_atespace,
+                    name=sid,
+                    resume=False,
+                )
+            else:
+                raise
+    except Exception as exc:
+        log.error("Failed to provision Substrate Actor for session %s: %s", sid, exc)
+        err_msg = f"Failed to provision Substrate Actor: {exc}"
+        state.current_stage = "error"
+        state.finished_at = _now()
+        if err_msg not in state.errors:
+            state.errors.append(err_msg)
+        _a2a_sessions[sid] = state
+        try:
+            await asyncio.to_thread(gcs.save_pipeline_state, sid, state)
+        except Exception:
+            pass
+        try:
+            await api_routes._persist_session(state)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(
+                gcs.save_progress_events,
+                sid,
+                [
+                    {
+                        "stage": "error",
+                        "pct": 0,
+                        "message": err_msg,
+                        "seq": 1,
+                        "ts": _now(),
+                    }
+                ],
+                True,
+            )
+        except Exception:
+            pass
+        return state
+
+    watcher = asyncio.create_task(_watch_and_cleanup_actor(sid))
+    _actor_watcher_tasks.add(watcher)
+    watcher.add_done_callback(_actor_watcher_tasks.discard)
     return state
+
+
+def _collect_session_spreads_and_breadcrumbs(
+    session_id: str,
+    base_url: str,
+) -> tuple[list[dict[str, Any]], list[str], int | None, str]:
+    """Load spread cards and formatted breadcrumbs from GCS for a running or finished session."""
+    try:
+        events, _ = gcs.load_progress_events(session_id)
+    except Exception:
+        events = []
+
+    breadcrumbs = format_breadcrumb_trail(events or [])
+    last_pct: int | None = None
+    last_detail = ""
+    for ev in reversed(events or []):
+        if isinstance(ev, dict):
+            if last_pct is None and ev.get("pct") is not None:
+                last_pct = int(ev["pct"])
+            if not last_detail and (ev.get("message") or ev.get("detail")):
+                last_detail = str(ev.get("message") or ev.get("detail"))
+
+    try:
+        images = [img for img in gcs.list_session_images(session_id) if _VALID_IMAGE_RE.match(img)]
+    except Exception:
+        images = []
+
+    spreads: list[dict[str, Any]] = []
+    if images:
+        captions = _load_spread_captions(session_id)
+        by_idx: dict[int, dict[str, Any]] = {}
+        for i, img_name in enumerate(images, start=1):
+            sp_idx = _parse_spread_index_from_filename(img_name, i)
+            sp_title = (
+                "Character & Style Reference"
+                if img_name == "reference.png" or sp_idx == 0
+                else f"Spread {sp_idx}"
+            )
+            by_idx[sp_idx] = {
+                "spread_index": sp_idx,
+                "title": sp_title,
+                "image_url": get_public_asset_url(
+                    session_id, "image", filename=img_name, base_url=base_url
+                ),
+                "caption": captions.get(sp_idx, f"Illustrated {sp_title}"),
+                "filename": img_name,
+            }
+        spreads = [by_idx[k] for k in sorted(by_idx)]
+
+    return spreads, breadcrumbs, last_pct, last_detail
 
 
 async def _stream_interactive_studio_turn(
@@ -779,6 +993,7 @@ async def _stream_interactive_studio_turn(
             context_id=context_id,
             state="working",
             final=False,
+            text="🎨 Consulting the Storybook Creative Director...",
         ),
     )
 
@@ -793,7 +1008,7 @@ async def _stream_interactive_studio_turn(
     envelopes = build_studio_surface(surface_id=surface_id, studio_state=studio_state)
     reply_text = studio_state["conversational_reply"]
 
-    # Frame 3: status-update (state="working", final=False) with [text_part, beginRendering, surfaceUpdate, dataModelUpdate]  # noqa: E501
+    # Frame 3: working with full A2UI surface (final: False)
     yield format_jsonrpc_sse(
         rpc_id,
         make_task_status_event(
@@ -806,7 +1021,7 @@ async def _stream_interactive_studio_turn(
         ),
     )
 
-    # Frame 4: artifact-update (lastChunk=True) with [text_part, beginRendering, surfaceUpdate, dataModelUpdate]  # noqa: E501
+    # Frame 4: artifact-update with full A2UI surface
     yield format_jsonrpc_sse(
         rpc_id,
         make_task_artifact_event(
@@ -814,13 +1029,13 @@ async def _stream_interactive_studio_turn(
             context_id=context_id,
             text=reply_text,
             envelopes=envelopes,
-            artifact_id=f"studio-{surface_id}",
-            name=f"Storybook Creative Studio: {studio_state['title']}",
+            artifact_id=f"studio-{task_id}",
+            name="Storybook Creative Studio",
             last_chunk=True,
         ),
     )
 
-    # Frame 5: status-update (state="completed", final=True) so WASD mounts the interactive A2UI Card immediately!  # noqa: E501
+    # Frame 5: final status-update (state="completed", final=True) for WASD
     yield format_jsonrpc_sse(
         rpc_id,
         make_task_status_event(
@@ -834,8 +1049,90 @@ async def _stream_interactive_studio_turn(
     )
 
 
-@a2a_router.post("/a2a")
-async def handle_a2a_rpc(request: Request):
+def _build_session_status_task(
+    session_id: str,
+    state: PipelineState,
+    base_url: str,
+    context_id: str | None = None,
+) -> dict[str, Any]:
+    """Build an A2A Task response for `session_id` with live breadcrumbs, spreads, and PDF link."""
+    title = state.config.source.title or "Storybook"
+    author = state.config.source.author or ""
+    surface_id = f"storybook_run_{session_id}"
+    spreads, breadcrumbs, last_pct, last_detail = _collect_session_spreads_and_breadcrumbs(
+        session_id, base_url
+    )
+    pct = last_pct if last_pct is not None else (state.progress_pct or 5)
+    trail_block = (
+        "\n\n**Live Activity Breadcrumbs:**\n" + "\n".join(breadcrumbs)
+        if breadcrumbs
+        else ""
+    )
+
+    if state.current_stage == "done":
+        pdf_url = get_public_asset_url(session_id, "pdf", "storybook.pdf", base_url=base_url)
+        envelopes = build_download_chip_update(
+            surface_id=surface_id,
+            pdf_url=pdf_url,
+            title=title,
+            author=author,
+            spreads=spreads,
+            breadcrumbs=breadcrumbs,
+            session_id=session_id,
+        )
+        a2a_state = "completed"
+        summary = (
+            f"🎉 Storybook '{title}' is complete.\n\n"
+            f"[📥 Download Completed Storybook PDF]({pdf_url})"
+            f"{trail_block}"
+        )
+    elif state.current_stage in ("error", "cancelled"):
+        err_detail = "; ".join(state.errors) if state.errors else (last_detail or "Pipeline failed")
+        envelopes = build_stage_update(
+            surface_id,
+            "error",
+            "failed",
+            detail=err_detail,
+            pct=pct,
+            title=title,
+            author=author,
+            spreads=spreads,
+            breadcrumbs=breadcrumbs,
+            session_id=session_id,
+        )
+        a2a_state = "failed"
+        summary = f"Storybook failed: {err_detail}{trail_block}"
+    else:
+        envelopes = build_stage_update(
+            surface_id,
+            state.current_stage,
+            "in_progress",
+            detail=last_detail,
+            pct=pct,
+            title=title,
+            author=author,
+            spreads=spreads,
+            breadcrumbs=breadcrumbs,
+            session_id=session_id,
+        )
+        a2a_state = "working"
+        summary = (
+            f"⏳ Storybook '{title}' is in stage '{state.current_stage}' ({pct}%)."
+            f"{trail_block}"
+        )
+
+    return _build_task_response(
+        task_id=session_id,
+        state=a2a_state,
+        text=summary,
+        envelopes=envelopes,
+        context_id=context_id or session_id,
+    )
+
+
+@a2a_router.post("/a2a", response_model=None)
+@a2a_router.post("/", response_model=None)
+async def handle_a2a_jsonrpc(request: Request) -> JSONResponse | StreamingResponse:
     """Handle A2A JSON-RPC 2.0 requests (message/send, message/stream, tasks/get)."""
     try:
         body = await request.json()
@@ -854,10 +1151,11 @@ async def handle_a2a_rpc(request: Request):
     params = body.get("params") or {}
     base_url = _base_url_from_request(request)
 
-    if method == "message/send":
+    if method in ("message/send", "tasks/send"):
         action_name, action_ctx, surface_id, text = _extract_action_from_message(params)
         task_id = str(
-            params.get("taskId")
+            params.get("sessionId")
+            or params.get("taskId")
             or params.get("id")
             or (params.get("message") or {}).get("taskId")
             or uuid.uuid4()
@@ -869,26 +1167,56 @@ async def handle_a2a_rpc(request: Request):
         )
         prior_state = _get_stored_studio_state(context_id, task_id=task_id, surface_id=surface_id)
 
+        if action_name == "check_status":
+            target_sid = str(
+                action_ctx.get("session_id") or params.get("sessionId") or task_id
+            ).strip()
+            state = _a2a_sessions.get(target_sid) or await asyncio.to_thread(
+                gcs.load_pipeline_state, target_sid
+            )
+            if state is not None:
+                task = _build_session_status_task(
+                    session_id=target_sid,
+                    state=state,
+                    base_url=base_url,
+                    context_id=context_id,
+                )
+                return JSONResponse(content={"jsonrpc": "2.0", "id": rpc_id, "result": task})
+
         if action_name == "generate_storybook" or (
             action_name is None and _is_explicit_generate_command(text)
         ):
             merged_ctx = {**(prior_state or {}), **action_ctx}
             state = await _create_and_start_storybook_session(
                 merged_ctx,
-                session_id=params.get("sessionId") or params.get("taskId"),
+                session_id=params.get("sessionId"),
                 studio_state=prior_state,
             )
+            if state.current_stage in ("error", "cancelled"):
+                task = _build_session_status_task(
+                    session_id=state.session_id,
+                    state=state,
+                    base_url=base_url,
+                    context_id=context_id,
+                )
+                return JSONResponse(content={"jsonrpc": "2.0", "id": rpc_id, "result": task})
+
             trace_url = f"{base_url}/api/sessions/{state.session_id}/trace"
             envelopes = build_progress_surface_init(
                 surface_id=f"storybook_run_{state.session_id}",
                 title=state.config.source.title,
                 author=state.config.source.author,
                 trace_url=trace_url,
+                session_id=state.session_id,
             )
             task = _build_task_response(
                 task_id=state.session_id,
                 state="working",
-                text=f"🚀 Started storybook generation for '{state.config.source.title}' (session {state.session_id}).",  # noqa: E501
+                text=(
+                    f"🚀 Started storybook generation for '{state.config.source.title}' "
+                    f"(session {state.session_id}).\n\n"
+                    f"**Live Activity Breadcrumbs:**\n✅ [5%] Initializing session"
+                ),
                 envelopes=envelopes,
                 context_id=context_id,
             )
@@ -913,7 +1241,9 @@ async def handle_a2a_rpc(request: Request):
 
     if method in ("message/stream", "tasks/sendSubscribe"):
         action_name, action_ctx, surface_id, text = _extract_action_from_message(params)
-        explicit_session_id = params.get("sessionId")
+        explicit_session_id = params.get("sessionId") or (
+            action_ctx.get("session_id") if action_name == "check_status" else None
+        )
         task_id = str(
             explicit_session_id
             or params.get("taskId")
@@ -940,7 +1270,7 @@ async def handle_a2a_rpc(request: Request):
             and not text
         )
         should_run_pipeline = (
-            action_name == "generate_storybook"
+            action_name in ("generate_storybook", "check_status")
             or (action_name is None and _is_explicit_generate_command(text))
             or existing_active_session
         )
@@ -967,7 +1297,18 @@ async def handle_a2a_rpc(request: Request):
 
         # Pipeline execution path: start or attach to storybook session
         session_id = str(explicit_session_id or "").strip()
-        if not session_id or (
+        if action_name == "check_status" and session_id:
+            st = _a2a_sessions.get(session_id)
+            if st is None:
+                try:
+                    st = await asyncio.to_thread(gcs.load_pipeline_state, session_id)
+                except Exception:
+                    st = None
+                if st is not None:
+                    _a2a_sessions[session_id] = st
+            title = st.config.source.title if st else str(action_ctx.get("title") or "Storybook")
+            author = st.config.source.author if st else str(action_ctx.get("author") or "")
+        elif not session_id or (
             session_id not in SESSION_A2UI_QUEUES and session_id not in _a2a_sessions
         ):
             merged_ctx = {**(prior_state or {}), **action_ctx}
@@ -1025,48 +1366,11 @@ async def handle_a2a_rpc(request: Request):
                 },
             )
 
-        title = state.config.source.title
-        author = state.config.source.author
-        surface_id = f"storybook_run_{task_id}"
-        if state.current_stage == "done":
-            pdf_url = get_public_asset_url(task_id, "pdf", "storybook.pdf", base_url=base_url)
-            envelopes = build_download_chip_update(
-                surface_id=surface_id,
-                pdf_url=pdf_url,
-                title=title,
-                author=author,
-            )
-            a2a_state = "completed"
-            summary = f"🎉 Storybook '{title}' is complete.\n\n[📥 Download Completed Storybook PDF]({pdf_url})"  # noqa: E501
-        elif state.current_stage in ("error", "cancelled"):
-            err_detail = "; ".join(state.errors) if state.errors else "Pipeline failed"
-            envelopes = build_stage_update(
-                surface_id,
-                "error",
-                "failed",
-                detail=err_detail,
-                title=title,
-                author=author,
-            )
-            a2a_state = "failed"
-            summary = f"Storybook failed: {err_detail}"
-        else:
-            envelopes = build_stage_update(
-                surface_id,
-                state.current_stage,
-                "in_progress",
-                title=title,
-                author=author,
-            )
-            a2a_state = "working"
-            summary = f"Storybook '{title}' is in stage '{state.current_stage}'."
-
-        task = _build_task_response(
-            task_id=task_id,
-            state=a2a_state,
-            text=summary,
-            envelopes=envelopes,
-            context_id=task_id,
+        task = _build_session_status_task(
+            session_id=str(task_id),
+            state=state,
+            base_url=base_url,
+            context_id=str(task_id),
         )
         return JSONResponse(content={"jsonrpc": "2.0", "id": rpc_id, "result": task})
 

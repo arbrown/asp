@@ -14,18 +14,120 @@ STUDIO_AGE_OPTIONS: list[str] = ["4-5", "6-8", "8-10", "10-12"]
 STUDIO_PAGE_OPTIONS: list[str] = ["12", "16", "24"]
 
 STAGE_LABELS: dict[str, str] = {
-    "initializing": "Initializing storybook pipeline",
+    "initializing": "Initializing session",
+    "resuming": "Resuming storybook pipeline",
     "fetching": "Fetching & preparing classic source text",
     "adapting_text": "Adapting story for target age band",
+    "building_character_bible": "Creating Character Bible & reference sheet",
+    "extracting_bible": "Creating Character Bible & reference sheet",
     "planning_spreads": "Planning page spreads & visual layout",
-    "extracting_bible": "Building character & world bible",
     "generating_image": "Illustrating storybook spreads",
     "image_generation": "Illustrating storybook spreads",
     "spread_image": "Illustrating storybook spreads",
+    "image_retry": "Refining spread illustration",
     "composing_pdf": "Typesetting & composing print-ready PDF",
     "done": "Storybook complete",
     "error": "Pipeline encountered an error",
 }
+
+STAGE_ICONS: dict[str, str] = {
+    "initializing": "✅",
+    "resuming": "🔄",
+    "fetching": "📚",
+    "adapting_text": "✍️",
+    "building_character_bible": "🎨",
+    "extracting_bible": "🎨",
+    "planning_spreads": "📐",
+    "generating_image": "🖼️",
+    "image_generation": "🖼️",
+    "spread_image": "🖼️",
+    "image_retry": "🔁",
+    "composing_pdf": "📄",
+    "done": "🎉",
+    "error": "❌",
+}
+
+
+def format_breadcrumb_line(
+    ev: dict[str, Any],
+    default_pct: int | float | None = None,
+) -> str:
+    """Format a pipeline progress event dict as a single human-readable breadcrumb line."""
+    stage = str(ev.get("stage") or "working")
+    icon = STAGE_ICONS.get(stage, "⏳")
+    raw_pct = ev.get("pct", default_pct)
+    pct_str = f"[{int(raw_pct)}%] " if raw_pct is not None else ""
+
+    raw_msg = str(
+        ev.get("message") or ev.get("detail") or ev.get("caption") or ""
+    ).strip()
+
+    spread_zero = ev.get("spread")
+    spread_one = ev.get("spread_index") or ev.get("spread_number") or ev.get("page_number")
+    total_of = ev.get("of")
+    of_str = f"/{total_of}" if total_of else ""
+
+    if stage == "image_retry":
+        if spread_zero is not None:
+            sp_disp = int(spread_zero) + 1
+        elif spread_one is not None:
+            sp_disp = int(spread_one)
+        else:
+            sp_disp = 1
+        attempt = ev.get("attempt") or 1
+        msg = f"Refining Spread {sp_disp}{of_str} illustration (attempt {attempt})"
+    elif stage in ("generating_image", "image_generation", "spread_image") and (
+        spread_zero is not None or spread_one is not None
+    ):
+        sp_disp = (
+            int(spread_one)
+            if spread_one is not None
+            else int(spread_zero) + 1  # type: ignore[arg-type]
+        )
+        low = raw_msg.lower()
+        if low in ("", "start", "in_progress"):
+            msg = f"Generating Spread {sp_disp}{of_str} illustration..."
+        elif low == "prompt ready":
+            msg = f"Drafted visual prompt for Spread {sp_disp}{of_str}"
+        elif low == "image ready":
+            msg = f"Generated Spread {sp_disp}{of_str} illustration"
+        elif low == "done":
+            msg = f"Verified & typeset Spread {sp_disp}{of_str}"
+        elif low == "cached":
+            msg = f"Loaded cached Spread {sp_disp}{of_str} illustration"
+        elif f"spread {sp_disp}" in low or "reference" in low:
+            msg = raw_msg
+        else:
+            msg = f"Spread {sp_disp}{of_str}: {raw_msg}"
+    elif raw_msg:
+        msg = raw_msg
+    else:
+        msg = STAGE_LABELS.get(stage, stage.replace("_", " ").title())
+
+    return f"{icon} {pct_str}{msg}".strip()
+
+
+def format_breadcrumb_trail(
+    events: list[dict[str, Any] | str],
+    max_items: int = 6,
+) -> list[str]:
+    """Build the last `max_items` deduplicated breadcrumb lines from progress events."""
+    lines: list[str] = []
+    last_pct: int | float | None = None
+    for item in events:
+        if isinstance(item, str):
+            line = item.strip()
+        elif isinstance(item, dict):
+            if item.get("pct") is not None:
+                last_pct = item.get("pct")
+            line = format_breadcrumb_line(item, default_pct=last_pct)
+        else:
+            continue
+        if not line:
+            continue
+        if not lines or lines[-1] != line:
+            lines.append(line)
+    return lines[-max_items:]
 
 
 def wrap_a2ui_part(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -826,6 +928,8 @@ def build_run_surface(
     spreads: list[dict[str, Any]] | None = None,
     pdf_url: str | None = None,
     trace_url: str | None = None,
+    breadcrumbs: list[str] | str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build WASD A2UI envelopes (beginRendering + surfaceUpdate) for live pipeline execution."""
     stage_label = STAGE_LABELS.get(stage, stage.replace("_", " ").title())
@@ -834,7 +938,34 @@ def build_run_surface(
     header_title = f"📖 Storybook Studio Run: {title}" + (f" by {author}" if author else "")
     stage_line = f"{status_badge} {stage_label}{pct_str}" + (f" — {detail}" if detail else "")
 
-    col_children: list[str] = ["run-header", "run-stage"]
+    resolved_session_id = session_id or (
+        surface_id[len("storybook_run_") :]
+        if surface_id.startswith("storybook_run_")
+        else surface_id
+    )
+
+    if isinstance(breadcrumbs, list):
+        breadcrumb_text = "\n".join(str(b).strip() for b in breadcrumbs if str(b).strip())
+    elif isinstance(breadcrumbs, str):
+        breadcrumb_text = breadcrumbs.strip()
+    else:
+        breadcrumb_text = ""
+
+    if not breadcrumb_text:
+        breadcrumb_text = format_breadcrumb_line(
+            {
+                "stage": stage,
+                "pct": pct if pct is not None else (100 if stage == "done" else 5),
+                "message": detail,
+            }
+        )
+
+    col_children: list[str] = [
+        "run-header",
+        "run-stage",
+        "breadcrumbs-header",
+        "breadcrumbs-log",
+    ]
     components: list[dict[str, Any]] = [
         {"id": "root", "component": {"Card": {"child": "main-col"}}},
         {
@@ -852,6 +983,24 @@ def build_run_surface(
                 "Text": {
                     "text": {"literalString": stage_line},
                     "usageHint": "h3",
+                }
+            },
+        },
+        {
+            "id": "breadcrumbs-header",
+            "component": {
+                "Text": {
+                    "text": {"literalString": "🧭 Live Activity Breadcrumbs"},
+                    "usageHint": "h4",
+                }
+            },
+        },
+        {
+            "id": "breadcrumbs-log",
+            "component": {
+                "Text": {
+                    "text": {"literalString": breadcrumb_text},
+                    "usageHint": "body",
                 }
             },
         },
@@ -875,8 +1024,12 @@ def build_run_surface(
     components.append({"id": "run-div", "component": {"Divider": {}}})
 
     for sp in spreads or []:
-        idx = int(sp.get("spread_index") or 1)
-        sp_title = str(sp.get("title") or f"Spread {idx}")
+        raw_idx = sp.get("spread_index")
+        idx = int(raw_idx) if raw_idx is not None else 1
+        sp_title = str(
+            sp.get("title")
+            or ("Character & Style Reference" if idx == 0 else f"Spread {idx}")
+        )
         sp_img = str(sp.get("image_url") or "")
         sp_text = str(sp.get("caption") or sp.get("page_text") or "")
 
@@ -886,7 +1039,8 @@ def build_run_surface(
         simg_id = f"spread-img-{idx}"
         scaption_id = f"spread-caption-{idx}"
 
-        col_children.append(card_id)
+        if card_id not in col_children:
+            col_children.append(card_id)
         s_children = [stitle_id]
         if sp_img:
             s_children.append(simg_id)
@@ -930,6 +1084,37 @@ def build_run_surface(
                 }
             )
 
+    if stage != "done" and status != "completed":
+        col_children.append("check-status-btn")
+        components.extend(
+            [
+                {
+                    "id": "check-status-btn-label",
+                    "component": {
+                        "Text": {"text": {"literalString": "🔄 Check Latest Progress"}}
+                    },
+                },
+                {
+                    "id": "check-status-btn",
+                    "component": {
+                        "Button": {
+                            "child": "check-status-btn-label",
+                            "primary": False,
+                            "action": {
+                                "name": "check_status",
+                                "context": [
+                                    {
+                                        "key": "session_id",
+                                        "value": {"literalString": resolved_session_id},
+                                    },
+                                ],
+                            },
+                        }
+                    },
+                },
+            ]
+        )
+
     if pdf_url:
         col_children.extend(["pdf-div", "pdf-summary", "download-btn"])
         components.extend(
@@ -940,7 +1125,10 @@ def build_run_surface(
                     "component": {
                         "Text": {
                             "text": {
-                                "literalString": f"🎉 Print-ready storybook PDF is complete! Direct link: {pdf_url}"  # noqa: E501
+                                "literalString": (
+                                    f"🎉 Your storybook '{title}' is ready! "
+                                    f"Download the print-ready PDF at: {pdf_url}"
+                                )
                             },
                             "usageHint": "body",
                         }
@@ -989,6 +1177,8 @@ def build_progress_surface_init(
     title: str = "Storybook",
     author: str = "",
     trace_url: str | None = None,
+    breadcrumbs: list[str] | str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build initial progress surface envelopes for a running storybook session."""
     return build_run_surface(
@@ -997,9 +1187,11 @@ def build_progress_surface_init(
         author=author,
         stage="initializing",
         status="in_progress",
-        detail="Provisioning GKE Substrate session",
+        detail="Initializing session",
         pct=5,
         trace_url=trace_url,
+        breadcrumbs=breadcrumbs or ["✅ [5%] Initializing session"],
+        session_id=session_id,
     )
 
 
@@ -1012,6 +1204,8 @@ def build_stage_update(
     title: str = "Storybook",
     author: str = "",
     spreads: list[dict[str, Any]] | None = None,
+    breadcrumbs: list[str] | str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build stage progress update envelopes in WASD A2UI format."""
     return build_run_surface(
@@ -1023,6 +1217,8 @@ def build_stage_update(
         detail=detail,
         pct=pct,
         spreads=spreads,
+        breadcrumbs=breadcrumbs,
+        session_id=session_id,
     )
 
 
@@ -1036,23 +1232,32 @@ def build_spread_card_update(
     all_spreads: list[dict[str, Any]] | None = None,
     book_title: str = "Storybook",
     book_author: str = "",
+    pct: int | float | None = None,
+    stage: str = "generating_image",
+    detail: str = "",
+    breadcrumbs: list[str] | str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build A2UI envelopes adding/updating a spread card with an Image component."""
+    default_title = "Character & Style Reference" if spread_index == 0 else f"Spread {spread_index}"
     spread_entry = {
         "spread_index": spread_index,
-        "title": title or f"Spread {spread_index}",
+        "title": title or default_title,
         "image_url": image_url,
-        "caption": caption or f"Illustrated spread {spread_index}",
+        "caption": caption or f"Illustrated {default_title.lower()}",
     }
     spreads = list(all_spreads) if all_spreads else [spread_entry]
     return build_run_surface(
         surface_id=surface_id,
         title=book_title,
         author=book_author,
-        stage="generating_image",
+        stage=stage,
         status="in_progress",
-        detail=f"Generated spread {spread_index}",
+        detail=detail or f"Generated {default_title}",
+        pct=pct,
         spreads=spreads,
+        breadcrumbs=breadcrumbs,
+        session_id=session_id,
     )
 
 
@@ -1062,6 +1267,8 @@ def build_download_chip_update(
     title: str = "Storybook",
     author: str = "",
     spreads: list[dict[str, Any]] | None = None,
+    breadcrumbs: list[str] | str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build final completed A2UI surface envelopes with spreads and PDF download action."""
     return build_run_surface(
@@ -1074,4 +1281,6 @@ def build_download_chip_update(
         pct=100,
         spreads=spreads,
         pdf_url=pdf_url,
+        breadcrumbs=breadcrumbs,
+        session_id=session_id,
     )

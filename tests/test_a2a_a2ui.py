@@ -463,3 +463,217 @@ def test_a2a_session_asset_proxy_routes():
         assert r_pdf.status_code == 200
         assert r_pdf.content == b"%PDF-1.7-fake"
         assert r_pdf.headers["content-type"] == "application/pdf"
+
+
+def test_a2a_session_image_spread_00_img0_and_regex():
+    """Verify spread_00_img0.png and reference.png are served while invalid filenames return 400."""
+    client = TestClient(app)
+    with patch("storybook.a2a.router.gcs.load_image", return_value=b"\x89PNG-spread00"):
+        r0 = client.get("/a2a/sessions/s1/images/spread_00_img0.png")
+        assert r0.status_code == 200
+        assert r0.content == b"\x89PNG-spread00"
+
+    with patch("storybook.a2a.router.gcs.load_image", return_value=b"\x89PNG-ref"):
+        r_ref = client.get("/a2a/sessions/s1/images/reference.png")
+        assert r_ref.status_code == 200
+        assert r_ref.content == b"\x89PNG-ref"
+
+    r_bad = client.get("/a2a/sessions/s1/images/evil.exe")
+    assert r_bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_stream_session_a2ui_events_realtime_breadcrumbs_and_spread_00_img0():
+    """Verify stream_session_a2ui_events emits real-time breadcrumbs from events.json, streams spread_00_img0.png with story text, and calls ate.stop_actor on completion."""  # noqa: E501
+    from storybook.a2a.sink import stream_session_a2ui_events
+    from storybook.models import PipelineState, SessionConfig, SourceConfig, SpreadContent
+
+    fake_state = PipelineState(
+        session_id="sess_breadcrumbs",
+        config=SessionConfig(source=SourceConfig(title="Demons", author="Fyodor Dostoevsky")),
+        current_stage="generating_image",
+        progress_pct=62,
+        spread_contents=[
+            SpreadContent(
+                spread_number=0,
+                recto_text="In a quiet provincial town, Stepan Trofimovich adjusted his cravat.",
+            ),
+            SpreadContent(
+                spread_number=1,
+                verso_text="Rain drummed on the cobblestones outside Varvara Petrovna's salon.",
+                recto_text="Nikolai Stavrogin arrived on the evening train.",
+            ),
+        ],
+    )
+
+    progress_batches = [
+        (
+            [
+                {"stage": "initializing", "pct": 5, "message": "Initializing session", "seq": 0},
+                {
+                    "stage": "fetching",
+                    "pct": 12,
+                    "message": 'Fetching literature: Found "Demons" on Project Gutenberg',
+                    "seq": 1,
+                },
+                {
+                    "stage": "adapting_text",
+                    "pct": 25,
+                    "message": "Adapting text into 24 pages for ages 8-10",
+                    "seq": 2,
+                },
+            ],
+            False,
+        ),
+        (
+            [
+                {"stage": "initializing", "pct": 5, "message": "Initializing session", "seq": 0},
+                {
+                    "stage": "fetching",
+                    "pct": 12,
+                    "message": 'Fetching literature: Found "Demons" on Project Gutenberg',
+                    "seq": 1,
+                },
+                {
+                    "stage": "adapting_text",
+                    "pct": 25,
+                    "message": "Adapting text into 24 pages for ages 8-10",
+                    "seq": 2,
+                },
+                {
+                    "stage": "building_character_bible",
+                    "pct": 40,
+                    "message": "Creating Character Bible & reference sheet",
+                    "seq": 3,
+                },
+                {
+                    "stage": "generating_image",
+                    "pct": 62,
+                    "spread": 1,
+                    "of": 6,
+                    "message": "Generating Spread 2 illustration (Russian folk art)...",
+                    "seq": 4,
+                },
+                {"stage": "done", "pct": 100, "message": "Storybook complete", "seq": 5},
+            ],
+            True,
+        ),
+    ]
+    image_batches = [
+        ["reference.png", "spread_00_img0.png"],
+        ["reference.png", "spread_00_img0.png", "spread_01_img0.png"],
+    ]
+
+    with (
+        patch("storybook.a2a.sink.gcs.load_progress_events", side_effect=progress_batches),
+        patch("storybook.a2a.sink.gcs.list_session_images", side_effect=image_batches),
+        patch("storybook.a2a.sink.gcs.load_pipeline_state", return_value=fake_state),
+        patch("storybook.a2a.sink.ate.stop_actor", new_callable=AsyncMock) as mock_stop_actor,
+    ):
+        raw_frames: list[str] = []
+        async for sse in stream_session_a2ui_events(
+            session_id="sess_breadcrumbs",
+            rpc_id="rpc-bc-1",
+            base_url="https://pushkin-agent.duckdns.org",
+            title="Demons",
+            author="Fyodor Dostoevsky",
+            poll_interval=0.01,
+            heartbeat_interval=0.05,
+        ):
+            raw_frames.append(sse)
+
+        mock_stop_actor.assert_awaited_with(
+            name="sess_breadcrumbs",
+            atespace="asp",
+        )
+
+    combined = "".join(raw_frames)
+    assert "spread_00_img0.png" in combined
+    assert "spread_01_img0.png" in combined
+    assert "reference.png" in combined
+    assert "Stepan Trofimovich adjusted his cravat" in combined
+    assert "Nikolai Stavrogin arrived on the evening train" in combined
+    assert "Project Gutenberg" in combined
+    assert "Creating Character Bible & reference sheet" in combined
+    assert "check_status" in combined
+
+    parsed = _parse_sse_frames(combined)
+    assert parsed[0]["result"]["status"]["state"] == "submitted"
+    assert parsed[-1]["result"]["status"]["state"] == "completed"
+    assert parsed[-1]["result"]["final"] is True
+
+
+@pytest.mark.asyncio
+async def test_reclaim_finished_actors_and_error_reporting():
+    """Verify _reclaim_finished_actors stops finished sessions and create_actor failures mark session as error."""  # noqa: E501
+    from storybook.a2a.router import (
+        _a2a_sessions,
+        _create_and_start_storybook_session,
+        _reclaim_finished_actors,
+    )
+    from storybook.models import PipelineState, SessionConfig, SourceConfig
+
+    done_session = PipelineState(
+        session_id="done-sess-1",
+        config=SessionConfig(source=SourceConfig(title="Alice", author="Lewis Carroll")),
+        current_stage="done",
+    )
+    err_session = PipelineState(
+        session_id="err-sess-2",
+        config=SessionConfig(source=SourceConfig(title="Bob", author="Author")),
+        current_stage="error",
+    )
+    running_session = PipelineState(
+        session_id="run-sess-3",
+        config=SessionConfig(source=SourceConfig(title="Running", author="Author")),
+        current_stage="generating_image",
+    )
+
+    with (
+        patch(
+            "storybook.a2a.router.store.list_sessions",
+            new=AsyncMock(return_value=[done_session, err_session, running_session]),
+        ),
+        patch("storybook.a2a.router.ate.stop_actor", new_callable=AsyncMock) as mock_stop,
+    ):
+        reclaimed = await _reclaim_finished_actors()
+        assert reclaimed >= 2
+        stopped_names = {call.kwargs["name"] for call in mock_stop.await_args_list}
+        assert "done-sess-1" in stopped_names
+        assert "err-sess-2" in stopped_names
+        assert "run-sess-3" not in stopped_names
+
+    # Verify RESOURCE_EXHAUSTED triggers reclaim + retry, and persistent failure sets stage="error"
+    saved_events: list[tuple] = []
+
+    def _capture_events(sid, evs, done=False):
+        saved_events.append((sid, evs, done))
+        return "gs://fake/events.json"
+
+    with (
+        patch(
+            "storybook.a2a.router.store.list_sessions",
+            new=AsyncMock(return_value=[done_session]),
+        ),
+        patch("storybook.a2a.router.ate.stop_actor", new_callable=AsyncMock) as mock_stop2,
+        patch(
+            "storybook.a2a.router.ate.create_actor",
+            new=AsyncMock(
+                side_effect=RuntimeError("StatusCode.RESOURCE_EXHAUSTED: no free workers available")
+            ),
+        ) as mock_create,
+        patch("storybook.a2a.router.gcs.save_pipeline_state"),
+        patch("storybook.a2a.router.gcs.save_progress_events", side_effect=_capture_events),
+        patch("storybook.a2a.router.api_routes._persist_session", new_callable=AsyncMock),
+    ):
+        failed_state = await _create_and_start_storybook_session(
+            {"title": "Demons", "author": "Dostoevsky"}
+        )
+        assert len(failed_state.session_id) == 36  # Full UUID
+        assert failed_state.current_stage == "error"
+        assert any("RESOURCE_EXHAUSTED" in e for e in failed_state.errors)
+        assert mock_create.await_count == 2  # initial attempt + 1 retry after reclaim
+        assert mock_stop2.await_count >= 2
+        assert saved_events[-1][2] is True
+        assert saved_events[-1][1][0]["stage"] == "error"
+        _a2a_sessions.pop(failed_state.session_id, None)
