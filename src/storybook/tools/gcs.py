@@ -181,7 +181,11 @@ def load_pages(session_id: str) -> list:
     bucket = _bucket()
     prefix = _blob_path(session_id, "pages") + "/"
     blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
-    pages = [StoryPage(**json.loads(b.download_as_text())) for b in blobs if b.name.endswith(".json")]
+    pages = [
+        StoryPage(**json.loads(b.download_as_text()))
+        for b in blobs
+        if b.name.endswith(".json")
+    ]
     if not pages:
         raise ValueError(f"No page JSON files found in GCS for session {session_id}")
     return pages
@@ -230,3 +234,26 @@ def load_spread_contents(session_id: str) -> list:
         for b in blobs
         if b.name.endswith(".json")
     ]
+
+
+def load_image(session_id: str, filename: str) -> bytes | None:
+    """Load image bytes from sessions/{id}/images/{filename}, or None if missing."""
+    candidates = [filename]
+    if filename.endswith("_img0.png"):
+        candidates.append(filename[:-9] + "_img1.png")
+    elif filename.endswith("_img1.png"):
+        candidates.append(filename[:-9] + "_img0.png")
+    for cand in candidates:
+        try:
+            return read_bytes(session_id, "images", cand)
+        except Exception:
+            continue
+    return None
+
+
+def load_pdf(session_id: str, filename: str = "storybook.pdf") -> bytes | None:
+    """Load PDF bytes from sessions/{id}/final/{filename}, or None if missing."""
+    try:
+        return read_bytes(session_id, "final", filename)
+    except Exception:
+        return None

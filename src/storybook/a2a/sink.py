@@ -37,15 +37,17 @@ def get_signed_or_api_url(
         filename: Asset filename (e.g. "spread_00_img0.png" or "storybook.pdf").
         base_url: Optional HTTP base URL for the API fallback route.
     """
-    clean_base = base_url.rstrip("/")
+    prefix = base_url.rstrip("/")
+    if prefix.endswith("/a2a"):
+        prefix = prefix[:-4]
     is_pdf = asset_type.lower() == "pdf"
     if is_pdf:
         blob_parts = ("final", filename or "storybook.pdf")
-        fallback_path = f"{clean_base}/api/v1/sessions/{session_id}/pdf"
+        fallback_path = f"{prefix}/a2a/sessions/{session_id}/pdf"
     else:
         fname = filename or "spread_00_img0.png"
         blob_parts = ("images", fname)
-        fallback_path = f"{clean_base}/api/v1/sessions/{session_id}/images/{fname}"
+        fallback_path = f"{prefix}/a2a/sessions/{session_id}/images/{fname}"
 
     try:
         bucket = gcs._bucket()

@@ -8,8 +8,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from storybook.a2a.a2ui import (
     A2UI_MIME_TYPE,
@@ -60,12 +60,31 @@ def _now() -> str:
 
 
 def _base_url_from_request(request: Request) -> str:
+    forwarded_host = request.headers.get("x-forwarded-host")
+    host = (
+        (forwarded_host or request.headers.get("host") or request.url.netloc)
+        .split(",")[0]
+        .strip()
+    )
+    forwarded_proto = (
+        request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    )
+    if "pushkin-agent.duckdns.org" in host:
+        scheme = "https"
+    elif forwarded_proto in ("http", "https"):
+        scheme = forwarded_proto
+    else:
+        scheme = request.url.scheme or "http"
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
     return str(request.base_url).rstrip("/")
 
 
 def build_agent_card(base_url: str = "http://localhost:8000") -> dict[str, Any]:
     """Build the A2A AgentCard advertising streaming and A2UI v0.9 capabilities."""
     clean_base = base_url.rstrip("/")
+    if clean_base.endswith("/a2a"):
+        clean_base = clean_base[:-4]
     return {
         "name": "Storybook Agent",
         "description": (
@@ -74,14 +93,23 @@ def build_agent_card(base_url: str = "http://localhost:8000") -> dict[str, Any]:
         ),
         "url": f"{clean_base}/a2a",
         "version": "0.1.0",
-        "protocolVersion": "0.2.5",
-        "defaultInputModes": ["text/plain", "application/json", A2UI_MIME_TYPE],
-        "defaultOutputModes": ["text/plain", "application/json", A2UI_MIME_TYPE],
+        "protocolVersion": "0.3.0",
+        "preferredTransport": "JSONRPC",
+        "defaultInputModes": ["text", "text/plain", "application/json", A2UI_MIME_TYPE],
+        "defaultOutputModes": ["text", "text/plain", "application/json", A2UI_MIME_TYPE],
         "capabilities": {
             "streaming": True,
             "pushNotifications": False,
             "stateTransitionHistory": True,
             "extensions": [
+                {
+                    "uri": "https://a2ui.org/a2a-extension/a2ui/v0.8",
+                    "description": "Provides agent driven UI using the A2UI JSON format.",
+                },
+                {
+                    "uri": "https://a2ui.org/a2a-extension/a2ui/v0.9",
+                    "description": "Provides agent driven UI using the A2UI JSON format.",
+                },
                 {
                     "uri": "https://a2ui.org/specification/v0_9",
                     "version": A2UI_VERSION,
@@ -91,7 +119,7 @@ def build_agent_card(base_url: str = "http://localhost:8000") -> dict[str, Any]:
                         "supportedCatalogIds": [GEMINI_ENTERPRISE_CATALOG_ID],
                         "mimeType": A2UI_MIME_TYPE,
                     },
-                }
+                },
             ],
         },
         "skills": [
@@ -130,9 +158,53 @@ def build_agent_card(base_url: str = "http://localhost:8000") -> dict[str, Any]:
 
 
 @a2a_router.get("/.well-known/agent.json")
+@a2a_router.get("/a2a/.well-known/agent.json")
 async def get_agent_card(request: Request) -> JSONResponse:
     """Return the A2A AgentCard for Gemini Enterprise discovery."""
     return JSONResponse(content=build_agent_card(_base_url_from_request(request)))
+
+
+@a2a_router.get("/a2a/sessions/{session_id}/images/{filename}")
+async def get_a2a_session_image(session_id: str, filename: str) -> Response:
+    """Serve session reference or spread image bytes for A2UI cards without IAP redirect."""
+    if (
+        "/" in filename
+        or ".." in filename
+        or not (
+            filename == "reference.png"
+            or (filename.startswith("spread_") and filename.endswith(".png"))
+        )
+    ):
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        data = gcs.load_image(session_id, filename)
+    except Exception:
+        data = None
+    if not data:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@a2a_router.get("/a2a/sessions/{session_id}/pdf")
+async def get_a2a_session_pdf(session_id: str) -> Response:
+    """Serve session final storybook PDF for A2UI download chips without IAP redirect."""
+    try:
+        data = gcs.load_pdf(session_id)
+    except Exception:
+        data = None
+    if not data:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="storybook-{session_id[:8]}.pdf"'
+        },
+    )
 
 
 def _unwrap_context_value(val: Any) -> Any:

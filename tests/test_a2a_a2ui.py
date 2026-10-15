@@ -172,13 +172,13 @@ def test_signed_url_and_fallback():
         pdf_fallback = get_signed_or_api_url(
             "sess-42", "pdf", "storybook.pdf", base_url="http://testserver"
         )
-        assert pdf_fallback == "http://testserver/api/v1/sessions/sess-42/pdf"
+        assert pdf_fallback == "http://testserver/a2a/sessions/sess-42/pdf"
 
         img_fallback = get_signed_or_api_url(
             "sess-42", "image", "spread_01_img0.png", base_url="http://testserver"
         )
         assert img_fallback == (
-            "http://testserver/api/v1/sessions/sess-42/images/spread_01_img0.png"
+            "http://testserver/a2a/sessions/sess-42/images/spread_01_img0.png"
         )
 
 
@@ -305,7 +305,7 @@ async def test_a2ui_event_sink_and_message_stream():
     spread_comps = {c["id"]: c for c in spread_part["data"]["updateComponents"]["components"]}
     assert "spread_card_0" in spread_comps
     assert spread_comps["spread_img_0"]["url"].endswith(
-        "/api/v1/sessions/sess-stream-1/images/spread_00_img0.png"
+        "/a2a/sessions/sess-stream-1/images/spread_00_img0.png"
     )
 
     final_ev = collected[3]
@@ -314,7 +314,7 @@ async def test_a2ui_event_sink_and_message_stream():
     final_part = _find_a2ui_part(final_ev["status"]["message"]["parts"])
     final_comps = {c["id"]: c for c in final_part["data"]["updateComponents"]["components"]}
     assert final_comps["download_pdf_chip"]["action"]["openUrl"]["url"].endswith(
-        "/api/v1/sessions/sess-stream-1/pdf"
+        "/a2a/sessions/sess-stream-1/pdf"
     )
 
     # Verify POST /a2a message/stream SSE endpoint end-to-end
@@ -424,3 +424,52 @@ async def test_a2ui_event_sink_and_message_stream():
         get_part = _find_a2ui_part(get_task["status"]["message"]["parts"])
         get_comps = {c["id"]: c for c in get_part["data"]["updateComponents"]["components"]}
         assert "download_pdf_chip" in get_comps
+
+
+def test_a2a_session_asset_proxy_routes():
+    client = TestClient(app)
+
+    # Also verify /a2a/.well-known/agent.json and https host forwarding
+    card_resp = client.get(
+        "/a2a/.well-known/agent.json",
+        headers={"Host": "pushkin-agent.duckdns.org"},
+    )
+    assert card_resp.status_code == 200
+    assert card_resp.json()["url"] == "https://pushkin-agent.duckdns.org/a2a"
+
+    # Valid spread image and reference image
+    with patch("storybook.tools.gcs.load_image", return_value=b"\x89PNG-fake-image"):
+        img_resp = client.get("/a2a/sessions/sess-12345678/images/spread_00_img0.png")
+        assert img_resp.status_code == 200
+        assert img_resp.headers["content-type"] == "image/png"
+        assert img_resp.headers["cache-control"] == "public, max-age=86400"
+        assert img_resp.content == b"\x89PNG-fake-image"
+
+        ref_resp = client.get("/a2a/sessions/sess-12345678/images/reference.png")
+        assert ref_resp.status_code == 200
+
+        # Invalid filename rejected with 404
+        bad_resp = client.get("/a2a/sessions/sess-12345678/images/other.png")
+        assert bad_resp.status_code == 404
+
+    # Missing image returns 404
+    with patch("storybook.tools.gcs.load_image", return_value=None):
+        missing_img = client.get("/a2a/sessions/sess-12345678/images/spread_01_img0.png")
+        assert missing_img.status_code == 404
+
+    # Valid PDF download
+    with patch("storybook.tools.gcs.load_pdf", return_value=b"%PDF-1.4-fake"):
+        pdf_resp = client.get("/a2a/sessions/12345678-abcd/pdf")
+        assert pdf_resp.status_code == 200
+        assert pdf_resp.headers["content-type"] == "application/pdf"
+        assert (
+            pdf_resp.headers["content-disposition"]
+            == 'attachment; filename="storybook-12345678.pdf"'
+        )
+        assert pdf_resp.content == b"%PDF-1.4-fake"
+
+    # Missing PDF returns 404
+    with patch("storybook.tools.gcs.load_pdf", return_value=None):
+        missing_pdf = client.get("/a2a/sessions/12345678-abcd/pdf")
+        assert missing_pdf.status_code == 404
+
