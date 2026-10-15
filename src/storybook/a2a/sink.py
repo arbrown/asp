@@ -1,10 +1,11 @@
-"""A2UI v0.9 event sink, GCS V4 signed URL helper, and A2A SSE stream generator."""
+"""A2UI event sink, asset URL helpers, and A2A SSE stream generator for Gemini Enterprise (WASD)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -12,15 +13,40 @@ from typing import Any
 
 from storybook.a2a.a2ui import (
     build_download_chip_update,
+    build_message_parts,
     build_progress_surface_init,
     build_spread_card_update,
     build_stage_update,
-    wrap_a2ui_data_part,
 )
 from storybook.events import EventSink
 from storybook.tools import gcs
 
 log = logging.getLogger(__name__)
+
+DEFAULT_PUBLIC_BASE_URL = "https://pushkin-agent.duckdns.org"
+
+
+def _normalize_base_url(base_url: str = "") -> str:
+    prefix = (base_url or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
+    if prefix.endswith("/a2a"):
+        prefix = prefix[:-4]
+    if "pushkin-agent.duckdns.org" in prefix and prefix.startswith("http://"):
+        prefix = "https://" + prefix[len("http://") :]
+    return prefix
+
+
+def get_public_asset_url(
+    session_id: str,
+    asset_type: str,
+    filename: str = "",
+    base_url: str = "",
+) -> str:
+    """Return the direct FastAPI proxy URL for a session PDF or spread image."""
+    prefix = _normalize_base_url(base_url)
+    if asset_type.lower() == "pdf":
+        return f"{prefix}/a2a/sessions/{session_id}/pdf"
+    fname = filename or "spread_01_img0.png"
+    return f"{prefix}/a2a/sessions/{session_id}/images/{fname}"
 
 
 def get_signed_or_api_url(
@@ -29,17 +55,8 @@ def get_signed_or_api_url(
     filename: str = "",
     base_url: str = "",
 ) -> str:
-    """Return a V4 signed GCS URL for a session asset, or fall back to the FastAPI proxy URL.
-
-    Args:
-        session_id: The storybook session ID.
-        asset_type: Either "pdf" or "image" (or "images").
-        filename: Asset filename (e.g. "spread_00_img0.png" or "storybook.pdf").
-        base_url: Optional HTTP base URL for the API fallback route.
-    """
-    prefix = base_url.rstrip("/")
-    if prefix.endswith("/a2a"):
-        prefix = prefix[:-4]
+    """Return a V4 signed GCS URL for a session asset, or fall back to the FastAPI proxy URL."""
+    prefix = _normalize_base_url(base_url)
     is_pdf = asset_type.lower() == "pdf"
     if is_pdf:
         blob_parts = ("final", filename or "storybook.pdf")
@@ -59,95 +76,126 @@ def get_signed_or_api_url(
             "method": "GET",
         }
         if is_pdf:
-            dl_name = filename or "storybook.pdf"
-            sign_kwargs["response_disposition"] = f'attachment; filename="{dl_name}"'
+            sign_kwargs["response_disposition"] = f'attachment; filename="storybook-{session_id}.pdf"'  # noqa: E501
             sign_kwargs["response_type"] = "application/pdf"
-        signed_url = blob.generate_signed_url(**sign_kwargs)
-        if isinstance(signed_url, str) and signed_url.startswith("http"):
-            return signed_url
+        signed = blob.generate_signed_url(**sign_kwargs)
+        if isinstance(signed, str) and signed.startswith("http"):
+            return signed
     except Exception as exc:
-        log.debug(
-            "GCS V4 signed URL unavailable for session %s (%s), falling back to API route: %s",
-            session_id,
-            asset_type,
-            exc,
-        )
+        log.debug("Falling back to API route URL for %s/%s: %s", session_id, asset_type, exc)
 
     return fallback_path
 
 
 def make_task_status_event(
-    session_id: str,
+    task_id: str,
     state: str,
-    envelopes: list[dict[str, Any]],
-    text: str,
     final: bool = False,
+    text: str | None = None,
+    envelopes: list[dict[str, Any]] | None = None,
+    context_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create an A2A TaskStatusUpdateEvent carrying A2UI v0.9 envelopes."""
+    """Create an A2A TaskStatusUpdateEvent payload with WASD-compatible A2UI parts."""
+    status_obj: dict[str, Any] = {
+        "state": state,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if text is not None or envelopes:
+        parts = build_message_parts(text or "", envelopes or [])
+        status_obj["message"] = {
+            "role": "agent",
+            "messageId": str(uuid.uuid4()),
+            "parts": parts,
+        }
+
     return {
         "kind": "status-update",
-        "taskId": session_id,
-        "contextId": session_id,
+        "taskId": task_id,
+        "contextId": context_id or task_id,
+        "status": status_obj,
         "final": final,
-        "status": {
-            "state": state,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "message": {
-                "kind": "message",
-                "role": "agent",
-                "messageId": str(uuid.uuid4()),
-                "taskId": session_id,
-                "contextId": session_id,
-                "parts": [
-                    {"kind": "text", "text": text},
-                    wrap_a2ui_data_part(envelopes),
-                ],
-            },
+    }
+
+
+def make_task_artifact_event(
+    task_id: str,
+    text: str,
+    envelopes: list[dict[str, Any]],
+    context_id: str | None = None,
+    artifact_id: str | None = None,
+    name: str | None = None,
+    last_chunk: bool = True,
+) -> dict[str, Any]:
+    """Create an A2A TaskArtifactUpdateEvent payload with WASD-compatible A2UI parts."""
+    return {
+        "kind": "artifact-update",
+        "taskId": task_id,
+        "contextId": context_id or task_id,
+        "artifact": {
+            "artifactId": artifact_id or f"storybook-{task_id}",
+            "name": name or "Storybook Output",
+            "parts": build_message_parts(text, envelopes),
         },
+        "lastChunk": last_chunk,
     }
 
 
 class A2UIEventSink:
-    """EventSink wrapper that translates pipeline progress events into A2A + A2UI v0.9 events."""
+    """Adapter around EventSink that translates pipeline progress events into A2UI SSE updates."""
 
     def __init__(
         self,
         session_id: str,
-        inner: EventSink | None = None,
-        queue: asyncio.Queue[dict[str, Any] | None] | None = None,
-        book_title: str = "Storybook",
+        inner_sink: EventSink | None = None,
         base_url: str = "",
-        emit_init_on_start: bool = True,
+        title: str = "Storybook",
+        author: str = "",
+        surface_id: str | None = None,
+        context_id: str | None = None,
+        out_queue: asyncio.Queue[dict[str, Any] | None] | None = None,
     ) -> None:
         self.session_id = session_id
-        self.inner = inner
-        self.queue: asyncio.Queue[dict[str, Any] | None] = queue or asyncio.Queue()
-        self.book_title = book_title or "Storybook"
-        self.base_url = base_url
-        self.emit_init_on_start = emit_init_on_start
+        self.inner_sink = inner_sink
+        self.base_url = _normalize_base_url(base_url)
+        self.title = title
+        self.author = author
+        self.surface_id = surface_id or f"storybook_run_{session_id}"
+        self.context_id = context_id or session_id
+        self.queue: asyncio.Queue[dict[str, Any] | None] = out_queue or asyncio.Queue()
+        self.spreads: list[dict[str, Any]] = []
+        self._emitted_spread_keys: set[str] = set()
         self._initialized = False
-        self._emitted_spreads: set[int] = set()
-        self._spread_card_ids: list[str] = []
         self._closed = False
 
+    @property
+    def spread_card_ids(self) -> list[str]:
+        return [f"spread-card-{sp['spread_index']}" for sp in self.spreads]
+
     async def ensure_initialized(self) -> None:
-        """Emit the initial Canvas createSurface + updateComponents event once."""
-        if not self._initialized:
-            self._initialized = True
-            if self.emit_init_on_start:
-                init_envelopes = build_progress_surface_init(self.session_id, title=self.book_title)
-                init_ev = make_task_status_event(
-                    session_id=self.session_id,
-                    state="working",
-                    envelopes=init_envelopes,
-                    text=f"Opening storybook workspace for '{self.book_title}'...",
-                    final=False,
-                )
-                await self.queue.put(init_ev)
+        if self._initialized:
+            return
+        self._initialized = True
+        trace_url = f"{self.base_url}/api/sessions/{self.session_id}/trace"
+        init_envelopes = build_progress_surface_init(
+            surface_id=self.surface_id,
+            title=self.title,
+            author=self.author,
+            trace_url=trace_url,
+        )
+        await self.queue.put(
+            make_task_status_event(
+                task_id=self.session_id,
+                context_id=self.context_id,
+                state="working",
+                final=False,
+                text=f"⏳ Starting storybook pipeline for **{self.title}** on GKE...",
+                envelopes=init_envelopes,
+            )
+        )
 
     async def put(self, item: dict[str, Any] | None) -> None:
-        if self.inner is not None:
-            await self.inner.put(item)
+        if self.inner_sink is not None:
+            await self.inner_sink.put(item)
 
         if item is None:
             if not self._closed:
@@ -157,132 +205,175 @@ class A2UIEventSink:
 
         await self.ensure_initialized()
 
-        stage = str(item.get("stage") or "working")
+        stage = str(item.get("stage", ""))
+        status = str(item.get("status", "in_progress"))
+        detail = str(item.get("detail") or item.get("message") or "")
+        message = str(item.get("message") or detail or "")
         pct = item.get("pct")
-        message = str(item.get("message") or "")
-        status_str = f"{pct}%" if pct is not None else str(item.get("status") or "working")
-
-        if stage == "done":
-            pdf_url = item.get("pdf_url") or get_signed_or_api_url(
-                self.session_id,
-                "pdf",
-                filename="storybook.pdf",
-                base_url=self.base_url,
-            )
-            title = str(item.get("book_title") or self.book_title or "Storybook")
-            dl_envelopes = build_download_chip_update(
-                self.session_id,
-                pdf_url=pdf_url,
-                book_title=title,
-            )
-            done_ev = make_task_status_event(
-                session_id=self.session_id,
-                state="completed",
-                envelopes=dl_envelopes,
-                text=f"Storybook '{title}' is complete and ready to download.",
-                final=True,
-            )
-            await self.queue.put(done_ev)
-            return
 
         if stage == "error":
-            err_envelopes = build_stage_update(
-                self.session_id,
+            envelopes = build_stage_update(
+                surface_id=self.surface_id,
                 stage="error",
                 status="failed",
                 detail=message or "Pipeline error",
+                pct=pct,
+                title=self.title,
+                author=self.author,
+                spreads=self.spreads,
             )
-            err_ev = make_task_status_event(
-                session_id=self.session_id,
-                state="failed",
-                envelopes=err_envelopes,
-                text=f"Storybook pipeline failed: {message or 'Unknown error'}",
-                final=True,
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    state="failed",
+                    final=True,
+                    text=f"❌ Storybook pipeline failed: {message or 'Unknown error'}",
+                    envelopes=envelopes,
+                )
             )
-            await self.queue.put(err_ev)
+            self._closed = True
+            await self.queue.put(None)
             return
 
-        # Check if this event represents a completed spread illustration
-        spread_raw = (
-            item.get("spread_index") if item.get("spread_index") is not None else item.get("spread")
-        )
-        is_spread_event = (
-            stage in ("image_generation", "spread_image")
-            or (
-                stage == "generating_image"
-                and message in ("image ready", "done", "cached", "")
-                and spread_raw is not None
+        if stage == "done":
+            pdf_url = get_public_asset_url(
+                self.session_id,
+                "pdf",
+                filename=str(item.get("pdf_filename") or "storybook.pdf"),
+                base_url=self.base_url,
             )
-            or ("image_url" in item and spread_raw is not None)
-        )
-
-        if is_spread_event and spread_raw is not None:
-            spread_idx = int(spread_raw)
-            if spread_idx not in self._emitted_spreads or "image_url" in item:
-                self._emitted_spreads.add(spread_idx)
-                filename = str(item.get("filename") or f"spread_{spread_idx:02d}_img0.png")
-                image_url = str(
-                    item.get("image_url")
-                    or get_signed_or_api_url(
-                        self.session_id,
-                        "image",
-                        filename=filename,
-                        base_url=self.base_url,
-                    )
-                )
-                caption = str(
-                    item.get("caption")
-                    or (f"Spread {spread_idx} — {message}" if message else f"Spread {spread_idx}")
-                )
-                card_id = f"spread_card_{spread_idx}"
-                spread_envelopes = build_spread_card_update(
-                    self.session_id,
-                    spread_index=spread_idx,
-                    image_url=image_url,
-                    caption=caption,
-                    existing_spread_ids=list(self._spread_card_ids),
-                )
-                if card_id not in self._spread_card_ids:
-                    self._spread_card_ids.append(card_id)
-                stage_envelopes = build_stage_update(
-                    self.session_id,
-                    stage=stage,
-                    status=status_str,
-                    detail=f"Spread {spread_idx} ready",
-                )
-                ev = make_task_status_event(
-                    session_id=self.session_id,
+            envelopes = build_download_chip_update(
+                surface_id=self.surface_id,
+                pdf_url=pdf_url,
+                title=self.title,
+                author=self.author,
+                spreads=self.spreads,
+            )
+            done_text = (
+                f"🎉 Your storybook **{self.title}**"
+                + (f" by **{self.author}**" if self.author else "")
+                + f" is complete!\n\n[📥 Download Completed Storybook PDF]({pdf_url})"
+            )
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
                     state="working",
-                    envelopes=stage_envelopes + spread_envelopes,
-                    text=f"Illustrated Spread {spread_idx}",
                     final=False,
+                    text=done_text,
+                    envelopes=envelopes,
                 )
-                await self.queue.put(ev)
-                return
+            )
+            await self.queue.put(
+                make_task_artifact_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    text=done_text,
+                    envelopes=envelopes,
+                    artifact_id=f"storybook-pdf-{self.session_id}",
+                    name=f"Storybook: {self.title}",
+                    last_chunk=True,
+                )
+            )
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    state="completed",
+                    final=True,
+                    text=done_text,
+                    envelopes=envelopes,
+                )
+            )
+            self._closed = True
+            await self.queue.put(None)
+            return
 
-        # Standard pipeline stage update
-        stage_envelopes = build_stage_update(
-            self.session_id,
-            stage=stage,
-            status=status_str,
-            detail=message,
+        spread_idx = item.get("spread_index") or item.get("spread_number") or item.get("page_number")  # noqa: E501
+        has_spread_image = (
+            stage in ("generating_image", "image_generation", "spread_image")
+            and (
+                spread_idx is not None
+                or item.get("image_url")
+                or item.get("filename")
+                or status in ("completed", "done")
+            )
         )
-        stage_ev = make_task_status_event(
-            session_id=self.session_id,
-            state="working",
-            envelopes=stage_envelopes,
-            text=f"Stage: {stage} ({status_str})" + (f" — {message}" if message else ""),
-            final=False,
-        )
-        await self.queue.put(stage_ev)
+
+        if has_spread_image:
+            idx = int(spread_idx) if spread_idx is not None else len(self.spreads) + 1
+            img_filename = str(item.get("filename") or f"spread_{idx:02d}_img0.png")
+            dedup_key = f"{idx}:{img_filename}"
+            image_url = str(item.get("image_url") or "") or get_public_asset_url(
+                self.session_id,
+                "image",
+                filename=img_filename,
+                base_url=self.base_url,
+            )
+            caption = str(item.get("caption") or item.get("page_text") or detail or f"Spread {idx} illustrated")  # noqa: E501
+            sp_title = str(item.get("title") or f"Spread {idx}")
+            if dedup_key not in self._emitted_spread_keys:
+                self._emitted_spread_keys.add(dedup_key)
+                self.spreads.append(
+                    {
+                        "spread_index": idx,
+                        "title": sp_title,
+                        "image_url": image_url,
+                        "caption": caption,
+                    }
+                )
+            envelopes = build_spread_card_update(
+                surface_id=self.surface_id,
+                spread_index=idx,
+                image_url=image_url,
+                caption=caption,
+                title=sp_title,
+                all_spreads=self.spreads,
+                book_title=self.title,
+                book_author=self.author,
+            )
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    state="working",
+                    final=False,
+                    text=f"🎨 Illustrated Spread {idx}: {caption}",
+                    envelopes=envelopes,
+                )
+            )
+            return
+
+        if stage:
+            envelopes = build_stage_update(
+                surface_id=self.surface_id,
+                stage=stage,
+                status=status,
+                detail=detail,
+                pct=pct,
+                title=self.title,
+                author=self.author,
+                spreads=self.spreads,
+            )
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    state="working",
+                    final=False,
+                    text=f"⏳ Stage '{stage}': {detail or status}",
+                    envelopes=envelopes,
+                )
+            )
 
     async def checkpoint(self) -> None:
-        if self.inner is not None and hasattr(self.inner, "checkpoint"):
-            await self.inner.checkpoint()  # type: ignore[attr-defined]
+        if self.inner_sink is not None and hasattr(self.inner_sink, "checkpoint"):
+            await self.inner_sink.checkpoint()
 
 
 def format_jsonrpc_sse(rpc_id: str | int | None, result: dict[str, Any]) -> str:
-    """Format a JSON-RPC 2.0 response payload as an SSE data frame."""
+    """Format an A2A JSON-RPC 2.0 response payload as an SSE data frame."""
     payload = {
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -291,21 +382,41 @@ def format_jsonrpc_sse(rpc_id: str | int | None, result: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _parse_spread_index_from_filename(filename: str, default_idx: int) -> int:
+    m = re.search(r"(?:spread|page)_0*(\d+)", filename)
+    if m:
+        try:
+            val = int(m.group(1))
+            return val if val >= 1 else val + 1
+        except Exception:
+            pass
+    return default_idx
+
+
 async def stream_session_a2ui_events(
     session_id: str,
-    rpc_id: str | int | None = None,
-    book_title: str = "Storybook",
+    rpc_id: str | int | None,
     base_url: str = "",
+    title: str = "Storybook",
+    author: str = "",
+    context_id: str | None = None,
     queue: asyncio.Queue[dict[str, Any] | None] | None = None,
     poll_interval: float = 1.0,
     heartbeat_interval: float = 15.0,
 ) -> AsyncIterator[str]:
-    """Stream A2A JSON-RPC 2.0 TaskStatusUpdateEvent SSE frames with 15s keepalive heartbeats.
+    """Yield JSON-RPC 2.0 SSE frames for a running storybook session."""
+    ctx_id = context_id or session_id
+    # 1. Always emit initial 'submitted' and 'working' frames first as required by WASD
+    yield format_jsonrpc_sse(
+        rpc_id,
+        make_task_status_event(
+            task_id=session_id,
+            context_id=ctx_id,
+            state="submitted",
+            final=False,
+        ),
+    )
 
-    Supports both:
-    - Live in-memory `A2UIEventSink` queue (when `queue` is provided)
-    - Polling GCS `load_progress_events(session_id)` for Substrate actor runs
-    """
     if queue is not None:
         while True:
             try:
@@ -313,21 +424,17 @@ async def stream_session_a2ui_events(
             except TimeoutError:
                 yield ": keepalive heartbeat\n\n"
                 continue
-
             if ev is None:
                 break
-
             yield format_jsonrpc_sse(rpc_id, ev)
-            if ev.get("final"):
-                break
         return
 
-    # GCS-backed progress stream converter
     sink = A2UIEventSink(
         session_id=session_id,
-        book_title=book_title,
         base_url=base_url,
-        emit_init_on_start=True,
+        title=title,
+        author=author,
+        context_id=ctx_id,
     )
     await sink.ensure_initialized()
     while not sink.queue.empty():
@@ -335,29 +442,66 @@ async def stream_session_a2ui_events(
         if init_ev is not None:
             yield format_jsonrpc_sse(rpc_id, init_ev)
 
-    cursor = 0
+    seen_count = 0
+    seen_images: set[str] = set()
     elapsed_since_heartbeat = 0.0
 
     while True:
         try:
-            events, is_done = await asyncio.to_thread(gcs.load_progress_events, session_id)
+            events, is_done = gcs.load_progress_events(session_id)
         except Exception:
             events, is_done = [], False
 
-        new_events = events[cursor:]
+        new_events = events[seen_count:]
+        seen_count = len(events)
+
         for raw_ev in new_events:
-            cursor += 1
             await sink.put(raw_ev)
             while not sink.queue.empty():
                 a2ui_ev = await sink.queue.get()
                 if a2ui_ev is None:
                     return
                 yield format_jsonrpc_sse(rpc_id, a2ui_ev)
-                if a2ui_ev.get("final"):
-                    return
+
+        # Also check GCS for newly written spread images (spread_1.png / spread_01_img0.png)
+        try:
+            current_images = gcs.list_session_images(session_id)
+        except Exception:
+            current_images = []
+
+        new_images = [img for img in current_images if img not in seen_images]
+        if new_images:
+            spread_captions: dict[int, str] = {}
+            try:
+                spread_objs = gcs.load_spread_contents(session_id)
+                for sp_obj in spread_objs:
+                    sp_num = getattr(sp_obj, "spread_number", None)
+                    sp_txt = getattr(sp_obj, "text", None) or getattr(sp_obj, "page_text", None)
+                    if sp_num is not None and sp_txt:
+                        spread_captions[int(sp_num)] = str(sp_txt)
+            except Exception:
+                pass
+
+            for img_name in new_images:
+                seen_images.add(img_name)
+                sp_idx = _parse_spread_index_from_filename(img_name, len(seen_images))
+                caption = spread_captions.get(sp_idx, f"Illustrated spread {sp_idx} ({img_name})")
+                await sink.put(
+                    {
+                        "stage": "spread_image",
+                        "status": "completed",
+                        "spread_index": sp_idx,
+                        "filename": img_name,
+                        "caption": caption,
+                    }
+                )
+                while not sink.queue.empty():
+                    a2ui_ev = await sink.queue.get()
+                    if a2ui_ev is None:
+                        return
+                    yield format_jsonrpc_sse(rpc_id, a2ui_ev)
 
         if is_done:
-            # If GCS marked done without an explicit "done" stage event in events list
             await sink.put({"stage": "done", "pct": 100})
             while not sink.queue.empty():
                 a2ui_ev = await sink.queue.get()

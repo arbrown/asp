@@ -257,3 +257,18 @@ def load_pdf(session_id: str, filename: str = "storybook.pdf") -> bytes | None:
         return read_bytes(session_id, "final", filename)
     except Exception:
         return None
+
+
+def list_session_images(session_id: str) -> list[str]:
+    """List generated spread/page image filenames stored under sessions/{session_id}/images/."""
+    try:
+        prefix = f"sessions/{session_id}/images/"
+        blobs = _bucket().list_blobs(prefix=prefix)
+        names = [
+            b.name[len(prefix) :]
+            for b in blobs
+            if b.name.endswith(".png") and not b.name[len(prefix) :].startswith("ref_")
+        ]
+        return sorted(names)
+    except Exception:
+        return []
