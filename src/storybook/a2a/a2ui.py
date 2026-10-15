@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 GEMINI_ENTERPRISE_CATALOG_ID = (
@@ -375,12 +376,27 @@ def default_studio_options_for_book(
     }
 
 
+def _unwrap_scalar_str(val: Any) -> str:
+    if isinstance(val, list):
+        return _unwrap_scalar_str(val[0]) if val else ""
+    s = str(val if val is not None else "").strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return _unwrap_scalar_str(parsed[0]) if parsed else ""
+        except Exception:
+            pass
+    return s
+
+
 def _coerce_age_band(age: Any) -> str:
-    raw = str(age or "6-8").strip()
+    raw = _unwrap_scalar_str(age or "6-8").replace("Ages ", "").strip()
     if raw in STUDIO_AGE_OPTIONS:
         return raw
     mapping = {
         "2-3": "4-5",
+        "3-5": "4-5",
         "4-5": "4-5",
         "6-7": "6-8",
         "6-8": "6-8",
@@ -393,7 +409,8 @@ def _coerce_age_band(age: Any) -> str:
 
 
 def _coerce_page_count_str(pages: Any) -> str:
-    raw = str(pages or "12").strip().split()[0]
+    unwrapped = _unwrap_scalar_str(pages or "12")
+    raw = (unwrapped.split()[0] if unwrapped else "12").strip()
     if raw in STUDIO_PAGE_OPTIONS:
         return raw
     try:
@@ -408,11 +425,11 @@ def _coerce_page_count_str(pages: Any) -> str:
 
 
 def _resolve_option_value(
-    candidate: str,
+    candidate: Any,
     options: list[dict[str, str]],
     fallback: str,
 ) -> str:
-    cand = (candidate or "").strip()
+    cand = _unwrap_scalar_str(candidate)
     if not cand:
         return fallback
     for opt in options:
@@ -454,11 +471,30 @@ def normalize_config_fields(
         or (text_options[0]["value"] if text_options else "Warm, wry read-aloud narrator.")
     )
 
-    raw_art = str(raw.get("art_style") or raw.get("image_spec") or raw.get("style") or "").strip()
-    raw_text = str(raw.get("text_style") or raw.get("text_spec") or raw.get("characters") or "").strip()  # noqa: E501
+    raw_art = _unwrap_scalar_str(
+        raw.get("art_style") or raw.get("image_spec") or raw.get("style") or ""
+    )
+    raw_text = _unwrap_scalar_str(
+        raw.get("text_style") or raw.get("text_spec") or raw.get("characters") or ""
+    )
 
     art_style = _resolve_option_value(raw_art, art_options, default_art)
     text_style = _resolve_option_value(raw_text, text_options, default_text)
+
+    custom_art_style = _unwrap_scalar_str(
+        raw["custom_art_style"]
+        if "custom_art_style" in raw
+        else fallback_studio.get("custom_art_style", "")
+    )
+    custom_text_style = _unwrap_scalar_str(
+        raw["custom_text_style"]
+        if "custom_text_style" in raw
+        else fallback_studio.get("custom_text_style", "")
+    )
+    if custom_art_style:
+        art_style = custom_art_style
+    if custom_text_style:
+        text_style = custom_text_style
 
     age_range = _coerce_age_band(
         raw.get("age_range")
@@ -471,13 +507,13 @@ def normalize_config_fields(
         or fallback_studio.get("recommended_pages")
         or "12"
     )
-    custom_instructions = str(
+    custom_instructions = _unwrap_scalar_str(
         raw.get("custom_instructions")
         or raw.get("freeform_notes")
         or raw.get("suggested_motif")
         or fallback_studio.get("suggested_motif")
         or ""
-    ).strip()
+    )
 
     return {
         "title": base_title,
@@ -485,9 +521,11 @@ def normalize_config_fields(
         "art_style": art_style,
         "image_spec": art_style,
         "style": art_style,
+        "custom_art_style": custom_art_style,
         "text_style": text_style,
         "text_spec": text_style,
         "characters": text_style,
+        "custom_text_style": custom_text_style,
         "age_range": age_range,
         "target_age": age_range,
         "page_count": page_count,
@@ -580,6 +618,9 @@ def ensure_studio_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         raw.get("conversational_reply") or defaults["conversational_reply"]
     ).strip()
 
+    custom_art_style = _unwrap_scalar_str(raw.get("custom_art_style", ""))
+    custom_text_style = _unwrap_scalar_str(raw.get("custom_text_style", ""))
+
     return {
         "conversational_reply": conversational_reply,
         "title": title,
@@ -588,6 +629,8 @@ def ensure_studio_state(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         "text_style_options": text_opts,
         "selected_art_style": selected_art,
         "selected_text_style": selected_text,
+        "custom_art_style": custom_art_style,
+        "custom_text_style": custom_text_style,
         "recommended_age": recommended_age,
         "recommended_pages": recommended_pages,
         "suggested_motif": suggested_motif,
@@ -599,17 +642,31 @@ def build_studio_surface(
     surface_id: str = "storybook_studio",
     studio_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the 3 WASD A2UI envelopes (beginRendering, surfaceUpdate, dataModelUpdate) for the Creative Studio."""  # noqa: E501
+    """Build the 3 WASD A2UI envelopes (surfaceUpdate, dataModelUpdate, beginRendering) for the Creative Studio."""  # noqa: E501
     st = ensure_studio_state(studio_state)
     title = st["title"]
     author = st["author"]
     art_options = st["art_style_options"]
     text_options = st["text_style_options"]
-    selected_art = st["selected_art_style"]
-    selected_text = st["selected_text_style"]
-    selected_age = st["recommended_age"]
-    selected_pages = str(st["recommended_pages"])
+    selected_art = _unwrap_scalar_str(st["selected_art_style"])
+    selected_text = _unwrap_scalar_str(st["selected_text_style"])
+    custom_art_style = _unwrap_scalar_str(st.get("custom_art_style", ""))
+    custom_text_style = _unwrap_scalar_str(st.get("custom_text_style", ""))
+    selected_age = _coerce_age_band(st["recommended_age"])
+    selected_pages = _coerce_page_count_str(st["recommended_pages"])
     motif = st["suggested_motif"]
+
+    action_context_entries = [
+        {"key": "title", "value": {"path": "/studio/title"}},
+        {"key": "author", "value": {"path": "/studio/author"}},
+        {"key": "art_style", "value": {"path": "/studio/artStyleSelections"}},
+        {"key": "custom_art_style", "value": {"path": "/studio/customArtStyle"}},
+        {"key": "text_style", "value": {"path": "/studio/textStyleSelections"}},
+        {"key": "custom_text_style", "value": {"path": "/studio/customTextStyle"}},
+        {"key": "age_range", "value": {"path": "/studio/ageSelections"}},
+        {"key": "page_count", "value": {"path": "/studio/pageCountSelections"}},
+        {"key": "custom_instructions", "value": {"path": "/studio/customInstructions"}},
+    ]
 
     components: list[dict[str, Any]] = [
         {"id": "root", "component": {"Card": {"child": "main-col"}}},
@@ -624,8 +681,10 @@ def build_studio_surface(
                             "div1",
                             "art-heading",
                             "art-picker",
+                            "art-custom-input",
                             "text-heading",
                             "text-picker",
+                            "text-custom-input",
                             "age-heading",
                             "age-picker",
                             "pages-heading",
@@ -683,7 +742,21 @@ def build_studio_surface(
                         {"label": {"literalString": opt["label"]}, "value": opt["value"]}
                         for opt in art_options
                     ],
+                    "filterable": True,
                     "maxAllowedSelections": 1,
+                    "placeholder": "Click to choose another preset art style...",
+                }
+            },
+        },
+        {
+            "id": "art-custom-input",
+            "component": {
+                "TextField": {
+                    "label": {
+                        "literalString": "1b. Custom Art Style / Edit Selected Style (optional override)"  # noqa: E501
+                    },
+                    "text": {"path": "/studio/customArtStyle"},
+                    "textFieldType": "shortText",
                 }
             },
         },
@@ -705,7 +778,21 @@ def build_studio_surface(
                         {"label": {"literalString": opt["label"]}, "value": opt["value"]}
                         for opt in text_options
                     ],
+                    "filterable": True,
                     "maxAllowedSelections": 1,
+                    "placeholder": "Click to choose another preset narrative style...",
+                }
+            },
+        },
+        {
+            "id": "text-custom-input",
+            "component": {
+                "TextField": {
+                    "label": {
+                        "literalString": "2b. Custom Narrative & Text Style / Edit Selected Style (optional override)"  # noqa: E501
+                    },
+                    "text": {"path": "/studio/customTextStyle"},
+                    "textFieldType": "shortText",
                 }
             },
         },
@@ -727,6 +814,7 @@ def build_studio_surface(
                         {"label": {"literalString": f"Ages {age}"}, "value": age}
                         for age in STUDIO_AGE_OPTIONS
                     ],
+                    "variant": "chips",
                     "maxAllowedSelections": 1,
                 }
             },
@@ -749,6 +837,7 @@ def build_studio_surface(
                         {"label": {"literalString": f"{p} pages"}, "value": p}
                         for p in STUDIO_PAGE_OPTIONS
                     ],
+                    "variant": "chips",
                     "maxAllowedSelections": 1,
                 }
             },
@@ -760,6 +849,7 @@ def build_studio_surface(
                 "TextField": {
                     "label": {"literalString": "5. Book Title"},
                     "text": {"path": "/studio/title"},
+                    "textFieldType": "shortText",
                 }
             },
         },
@@ -769,6 +859,7 @@ def build_studio_surface(
                 "TextField": {
                     "label": {"literalString": "6. Author"},
                     "text": {"path": "/studio/author"},
+                    "textFieldType": "shortText",
                 }
             },
         },
@@ -778,6 +869,7 @@ def build_studio_surface(
                 "TextField": {
                     "label": {"literalString": "7. Custom Instructions / Recurring Visual Motif"},
                     "text": {"path": "/studio/customInstructions"},
+                    "textFieldType": "shortText",
                 }
             },
         },
@@ -796,10 +888,7 @@ def build_studio_surface(
                     "primary": False,
                     "action": {
                         "name": "im_feeling_lucky",
-                        "context": [
-                            {"key": "age_range", "value": {"path": "/studio/ageSelections"}},
-                            {"key": "page_count", "value": {"path": "/studio/pageCountSelections"}},
-                        ],
+                        "context": action_context_entries,
                     },
                 }
             },
@@ -818,13 +907,7 @@ def build_studio_surface(
                     "primary": False,
                     "action": {
                         "name": "shuffle_styles",
-                        "context": [
-                            {"key": "title", "value": {"path": "/studio/title"}},
-                            {"key": "author", "value": {"path": "/studio/author"}},
-                            {"key": "age_range", "value": {"path": "/studio/ageSelections"}},
-                            {"key": "page_count", "value": {"path": "/studio/pageCountSelections"}},
-                            {"key": "custom_instructions", "value": {"path": "/studio/customInstructions"}},  # noqa: E501
-                        ],
+                        "context": action_context_entries,
                     },
                 }
             },
@@ -843,15 +926,7 @@ def build_studio_surface(
                     "primary": True,
                     "action": {
                         "name": "generate_storybook",
-                        "context": [
-                            {"key": "title", "value": {"path": "/studio/title"}},
-                            {"key": "author", "value": {"path": "/studio/author"}},
-                            {"key": "art_style", "value": {"path": "/studio/artStyleSelections"}},
-                            {"key": "text_style", "value": {"path": "/studio/textStyleSelections"}},
-                            {"key": "age_range", "value": {"path": "/studio/ageSelections"}},
-                            {"key": "page_count", "value": {"path": "/studio/pageCountSelections"}},
-                            {"key": "custom_instructions", "value": {"path": "/studio/customInstructions"}},  # noqa: E501
-                        ],
+                        "context": action_context_entries,
                     },
                 }
             },
@@ -869,7 +944,6 @@ def build_studio_surface(
     ]
 
     return [
-        {"beginRendering": {"surfaceId": surface_id, "root": "root"}},
         {"surfaceUpdate": {"surfaceId": surface_id, "components": components}},
         {
             "dataModelUpdate": {
@@ -879,25 +953,28 @@ def build_studio_surface(
                     {"key": "title", "valueString": title},
                     {"key": "author", "valueString": author},
                     {"key": "customInstructions", "valueString": motif},
+                    {"key": "customArtStyle", "valueString": custom_art_style},
+                    {"key": "customTextStyle", "valueString": custom_text_style},
                     {
                         "key": "artStyleSelections",
-                        "valueMap": [{"key": "0", "valueString": selected_art}],
+                        "valueString": json.dumps([selected_art]),
                     },
                     {
                         "key": "textStyleSelections",
-                        "valueMap": [{"key": "0", "valueString": selected_text}],
+                        "valueString": json.dumps([selected_text]),
                     },
                     {
                         "key": "ageSelections",
-                        "valueMap": [{"key": "0", "valueString": selected_age}],
+                        "valueString": json.dumps([selected_age]),
                     },
                     {
                         "key": "pageCountSelections",
-                        "valueMap": [{"key": "0", "valueString": selected_pages}],
+                        "valueString": json.dumps([selected_pages]),
                     },
                 ],
             }
         },
+        {"beginRendering": {"surfaceId": surface_id, "root": "root"}},
     ]
 
 
@@ -945,9 +1022,11 @@ def build_run_surface(
     )
 
     if isinstance(breadcrumbs, list):
-        breadcrumb_text = "\n".join(str(b).strip() for b in breadcrumbs if str(b).strip())
+        non_empty = [str(b).strip() for b in breadcrumbs if str(b).strip()]
+        breadcrumb_text = non_empty[-1] if non_empty else ""
     elif isinstance(breadcrumbs, str):
-        breadcrumb_text = breadcrumbs.strip()
+        non_empty = [line.strip() for line in breadcrumbs.splitlines() if line.strip()]
+        breadcrumb_text = non_empty[-1] if non_empty else ""
     else:
         breadcrumb_text = ""
 
@@ -963,7 +1042,6 @@ def build_run_surface(
     col_children: list[str] = [
         "run-header",
         "run-stage",
-        "breadcrumbs-header",
         "breadcrumbs-log",
     ]
     components: list[dict[str, Any]] = [
@@ -983,15 +1061,6 @@ def build_run_surface(
                 "Text": {
                     "text": {"literalString": stage_line},
                     "usageHint": "h3",
-                }
-            },
-        },
-        {
-            "id": "breadcrumbs-header",
-            "component": {
-                "Text": {
-                    "text": {"literalString": "🧭 Live Activity Breadcrumbs"},
-                    "usageHint": "h4",
                 }
             },
         },
@@ -1207,7 +1276,14 @@ def build_stage_update(
     breadcrumbs: list[str] | str | None = None,
     session_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Build stage progress update envelopes in WASD A2UI format."""
+    """Build stage progress update envelopes in WASD A2UI format showing only the single current step."""  # noqa: E501
+    current_step = format_breadcrumb_line(
+        {
+            "stage": stage,
+            "pct": pct if pct is not None else (100 if stage == "done" else 5),
+            "message": detail,
+        }
+    )
     return build_run_surface(
         surface_id=surface_id,
         title=title,
@@ -1217,7 +1293,7 @@ def build_stage_update(
         detail=detail,
         pct=pct,
         spreads=spreads,
-        breadcrumbs=breadcrumbs,
+        breadcrumbs=[current_step],
         session_id=session_id,
     )
 

@@ -38,7 +38,6 @@ from storybook.a2a.sink import (
     _parse_spread_index_from_filename,
     format_jsonrpc_sse,
     get_public_asset_url,
-    make_task_artifact_event,
     make_task_status_event,
     stream_session_a2ui_events,
 )
@@ -261,16 +260,26 @@ async def get_a2a_session_pdf(session_id: str) -> Response:
 
 
 def _unwrap_context_value(val: Any) -> Any:
-    """Recursively unwrap A2UI Button context values (valueMap, literalString, lists, dicts)."""
+    """Recursively unwrap A2UI Button context values (valueMap, literalString, JSON arrays, lists, dicts)."""  # noqa: E501
     if isinstance(val, list):
         if not val:
             return ""
         return _unwrap_context_value(val[0])
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return _unwrap_context_value(parsed[0]) if parsed else ""
+            except Exception:
+                pass
+        return val
     if isinstance(val, dict):
         if "valueString" in val:
-            return val["valueString"]
+            return _unwrap_context_value(val["valueString"])
         if "literalString" in val:
-            return val["literalString"]
+            return _unwrap_context_value(val["literalString"])
         if "valueMap" in val and isinstance(val["valueMap"], list):
             for entry in val["valueMap"]:
                 if isinstance(entry, dict) and ("valueString" in entry or "value" in entry):
@@ -375,9 +384,11 @@ def _extract_action_from_message(params: dict[str, Any]) -> tuple[str | None, di
                 "title",
                 "author",
                 "art_style",
+                "custom_art_style",
                 "image_spec",
                 "style",
                 "text_style",
+                "custom_text_style",
                 "text_spec",
                 "characters",
                 "age_range",
@@ -429,6 +440,64 @@ def _save_studio_state(
     for key in (context_id, task_id, surface_id, "__latest__"):
         if key:
             _studio_contexts[key] = ensured
+
+
+def _merge_action_overrides(
+    prior_state: dict[str, Any] | None,
+    action_ctx: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Merge user-edited action_ctx fields over prior_state so edits always win."""
+    act = dict(action_ctx or {})
+    merged: dict[str, Any] = {**(prior_state or {}), **act}
+    if act.get("title"):
+        merged["title"] = str(act["title"]).strip()
+    if act.get("author"):
+        merged["author"] = str(act["author"]).strip()
+    if act.get("custom_instructions"):
+        ci = str(act["custom_instructions"]).strip()
+        merged["custom_instructions"] = ci
+        merged["freeform_notes"] = ci
+        merged["suggested_motif"] = ci
+    if act.get("custom_art_style"):
+        ca = str(act["custom_art_style"]).strip()
+        merged["custom_art_style"] = ca
+        merged["art_style"] = ca
+        merged["image_spec"] = ca
+        merged["style"] = ca
+        merged["selected_art_style"] = ca
+    if act.get("custom_text_style"):
+        ct = str(act["custom_text_style"]).strip()
+        merged["custom_text_style"] = ct
+        merged["text_style"] = ct
+        merged["text_spec"] = ct
+        merged["characters"] = ct
+        merged["selected_text_style"] = ct
+    if act.get("age_range") or act.get("target_age"):
+        ag = str(act.get("age_range") or act.get("target_age")).strip()
+        merged["age_range"] = ag
+        merged["target_age"] = ag
+        merged["recommended_age"] = ag
+    if act.get("page_count"):
+        pg = str(act["page_count"]).strip()
+        merged["page_count"] = pg
+        merged["recommended_pages"] = pg
+
+    updated_studio = dict(prior_state) if prior_state else None
+    if updated_studio is not None:
+        for k in (
+            "title",
+            "author",
+            "suggested_motif",
+            "custom_art_style",
+            "custom_text_style",
+            "selected_art_style",
+            "selected_text_style",
+            "recommended_age",
+            "recommended_pages",
+        ):
+            if k in merged and merged[k] not in ("", None):
+                updated_studio[k] = merged[k]
+    return merged, updated_studio
 
 
 def _is_explicit_generate_command(text: str) -> bool:
@@ -651,7 +720,18 @@ async def _run_creative_director(
         log.warning("Gemini Creative Director call failed; using tailored fallback: %s", exc)
         raw_plan = default_studio_options_for_book(fallback_title, fallback_author)
 
-    # Apply any explicit age/page overrides from user text or button context
+    # Apply any explicit overrides from user text or button context
+    if action_ctx.get("title"):
+        raw_plan["title"] = str(action_ctx["title"]).strip()
+    if action_ctx.get("author"):
+        raw_plan["author"] = str(action_ctx["author"]).strip()
+    if action_ctx.get("custom_instructions"):
+        raw_plan["suggested_motif"] = str(action_ctx["custom_instructions"]).strip()
+    if "custom_art_style" in action_ctx:
+        raw_plan["custom_art_style"] = str(action_ctx["custom_art_style"]).strip()
+    if "custom_text_style" in action_ctx:
+        raw_plan["custom_text_style"] = str(action_ctx["custom_text_style"]).strip()
+
     lower_text = (user_text or "").lower()
     for age_opt in STUDIO_AGE_OPTIONS:
         if age_opt in lower_text:
@@ -974,6 +1054,8 @@ async def _stream_interactive_studio_turn(
     prior_state: dict[str, Any] | None,
 ) -> AsyncIterator[str]:
     """Stream the WASD SSE sequence for an interactive Creative Studio turn and close with final: True."""  # noqa: E501
+    fresh_surface_id = f"storybook-studio-{uuid.uuid4().hex[:8]}"
+
     # Frame 1: submitted (final: False)
     yield format_jsonrpc_sse(
         rpc_id,
@@ -985,30 +1067,23 @@ async def _stream_interactive_studio_turn(
         ),
     )
 
-    # Frame 2: working (final: False)
-    yield format_jsonrpc_sse(
-        rpc_id,
-        make_task_status_event(
-            task_id=task_id,
-            context_id=context_id,
-            state="working",
-            final=False,
-            text="🎨 Consulting the Storybook Creative Director...",
-        ),
-    )
-
     studio_state = await _run_creative_director(
         user_text=user_text,
         prior_state=prior_state,
         action_name=action_name,
         action_ctx=action_ctx,
     )
-    _save_studio_state(studio_state, context_id=context_id, task_id=task_id, surface_id=surface_id)
+    _save_studio_state(
+        studio_state,
+        context_id=context_id,
+        task_id=task_id,
+        surface_id=fresh_surface_id,
+    )
 
-    envelopes = build_studio_surface(surface_id=surface_id, studio_state=studio_state)
+    envelopes = build_studio_surface(surface_id=fresh_surface_id, studio_state=studio_state)
     reply_text = studio_state["conversational_reply"]
 
-    # Frame 3: working with full A2UI surface (final: False)
+    # Frame 2: working with full A2UI surface (final: False)
     yield format_jsonrpc_sse(
         rpc_id,
         make_task_status_event(
@@ -1021,21 +1096,7 @@ async def _stream_interactive_studio_turn(
         ),
     )
 
-    # Frame 4: artifact-update with full A2UI surface
-    yield format_jsonrpc_sse(
-        rpc_id,
-        make_task_artifact_event(
-            task_id=task_id,
-            context_id=context_id,
-            text=reply_text,
-            envelopes=envelopes,
-            artifact_id=f"studio-{task_id}",
-            name="Storybook Creative Studio",
-            last_chunk=True,
-        ),
-    )
-
-    # Frame 5: final status-update (state="completed", final=True) for WASD
+    # Frame 3: completed (final: True, no duplicate message/envelopes)
     yield format_jsonrpc_sse(
         rpc_id,
         make_task_status_event(
@@ -1043,8 +1104,6 @@ async def _stream_interactive_studio_turn(
             context_id=context_id,
             state="completed",
             final=True,
-            text=reply_text,
-            envelopes=envelopes,
         ),
     )
 
@@ -1063,11 +1122,7 @@ def _build_session_status_task(
         session_id, base_url
     )
     pct = last_pct if last_pct is not None else (state.progress_pct or 5)
-    trail_block = (
-        "\n\n**Live Activity Breadcrumbs:**\n" + "\n".join(breadcrumbs)
-        if breadcrumbs
-        else ""
-    )
+    trail_block = f"\n{breadcrumbs[-1]}" if breadcrumbs else ""
 
     if state.current_stage == "done":
         pdf_url = get_public_asset_url(session_id, "pdf", "storybook.pdf", base_url=base_url)
@@ -1186,11 +1241,18 @@ async def handle_a2a_jsonrpc(request: Request) -> JSONResponse | StreamingRespon
         if action_name == "generate_storybook" or (
             action_name is None and _is_explicit_generate_command(text)
         ):
-            merged_ctx = {**(prior_state or {}), **action_ctx}
+            merged_ctx, updated_studio = _merge_action_overrides(prior_state, action_ctx)
+            if updated_studio:
+                _save_studio_state(
+                    updated_studio,
+                    context_id=context_id,
+                    task_id=task_id,
+                    surface_id=surface_id,
+                )
             state = await _create_and_start_storybook_session(
                 merged_ctx,
                 session_id=params.get("sessionId"),
-                studio_state=prior_state,
+                studio_state=updated_studio,
             )
             if state.current_stage in ("error", "cancelled"):
                 task = _build_session_status_task(
@@ -1212,11 +1274,7 @@ async def handle_a2a_jsonrpc(request: Request) -> JSONResponse | StreamingRespon
             task = _build_task_response(
                 task_id=state.session_id,
                 state="working",
-                text=(
-                    f"🚀 Started storybook generation for '{state.config.source.title}' "
-                    f"(session {state.session_id}).\n\n"
-                    f"**Live Activity Breadcrumbs:**\n✅ [5%] Initializing session"
-                ),
+                text="✅ [5%] Initializing session",
                 envelopes=envelopes,
                 context_id=context_id,
             )
@@ -1311,11 +1369,18 @@ async def handle_a2a_jsonrpc(request: Request) -> JSONResponse | StreamingRespon
         elif not session_id or (
             session_id not in SESSION_A2UI_QUEUES and session_id not in _a2a_sessions
         ):
-            merged_ctx = {**(prior_state or {}), **action_ctx}
+            merged_ctx, updated_studio = _merge_action_overrides(prior_state, action_ctx)
+            if updated_studio:
+                _save_studio_state(
+                    updated_studio,
+                    context_id=context_id,
+                    task_id=task_id,
+                    surface_id=surface_id,
+                )
             state = await _create_and_start_storybook_session(
                 merged_ctx,
                 session_id=session_id or None,
-                studio_state=prior_state,
+                studio_state=updated_studio,
             )
             session_id = state.session_id
             title = state.config.source.title

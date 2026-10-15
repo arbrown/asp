@@ -64,32 +64,55 @@ def test_wasd_a2ui_surface_builders_unit():
         },
     )
     assert len(envelopes) == 3
-    assert envelopes[0] == {"beginRendering": {"surfaceId": "studio_1", "root": "root"}}
-    assert "surfaceUpdate" in envelopes[1]
-    assert "dataModelUpdate" in envelopes[2]
+    assert "surfaceUpdate" in envelopes[0]
+    assert "dataModelUpdate" in envelopes[1]
+    assert envelopes[2] == {"beginRendering": {"surfaceId": "studio_1", "root": "root"}}
 
-    comps = {c["id"]: c["component"] for c in envelopes[1]["surfaceUpdate"]["components"]}
+    comps = {c["id"]: c["component"] for c in envelopes[0]["surfaceUpdate"]["components"]}
     assert comps["root"] == {"Card": {"child": "main-col"}}
     assert "explicitList" in comps["main-col"]["Column"]["children"]
     assert "MultipleChoice" in comps["art-picker"]
     assert comps["art-picker"]["MultipleChoice"]["selections"] == {
         "path": "/studio/artStyleSelections"
     }
+    assert comps["art-picker"]["MultipleChoice"]["filterable"] is True
+    assert comps["art-picker"]["MultipleChoice"]["maxAllowedSelections"] == 1
     assert len(comps["art-picker"]["MultipleChoice"]["options"]) == 4
+    assert comps["art-custom-input"]["TextField"]["text"] == {"path": "/studio/customArtStyle"}
+    assert comps["art-custom-input"]["TextField"]["textFieldType"] == "shortText"
+
     assert "MultipleChoice" in comps["text-picker"]
+    assert comps["text-picker"]["MultipleChoice"]["filterable"] is True
+    assert comps["text-picker"]["MultipleChoice"]["maxAllowedSelections"] == 1
     assert len(comps["text-picker"]["MultipleChoice"]["options"]) == 4
-    assert "MultipleChoice" in comps["age-picker"]
-    assert "MultipleChoice" in comps["pages-picker"]
-    assert "TextField" in comps["custom-motif-input"]
+    assert comps["text-custom-input"]["TextField"]["text"] == {"path": "/studio/customTextStyle"}
+    assert comps["text-custom-input"]["TextField"]["textFieldType"] == "shortText"
+
+    assert comps["age-picker"]["MultipleChoice"]["variant"] == "chips"
+    assert comps["age-picker"]["MultipleChoice"]["maxAllowedSelections"] == 1
+    assert comps["pages-picker"]["MultipleChoice"]["variant"] == "chips"
+    assert comps["pages-picker"]["MultipleChoice"]["maxAllowedSelections"] == 1
+
+    assert comps["title-input"]["TextField"]["textFieldType"] == "shortText"
+    assert comps["author-input"]["TextField"]["textFieldType"] == "shortText"
+    assert comps["custom-motif-input"]["TextField"]["textFieldType"] == "shortText"
     assert comps["generate-btn"]["Button"]["action"]["name"] == "generate_storybook"
 
-    dm = envelopes[2]["dataModelUpdate"]
+    dm = envelopes[1]["dataModelUpdate"]
     assert dm["path"] == "/studio"
     dm_keys = {item["key"]: item for item in dm["contents"]}
     assert dm_keys["title"]["valueString"] == "Demons"
     assert dm_keys["author"]["valueString"] == "Fyodor Dostoevsky"
-    assert dm_keys["ageSelections"]["valueMap"][0]["valueString"] == "8-10"
-    assert dm_keys["pageCountSelections"]["valueMap"][0]["valueString"] == "16"
+    assert dm_keys["customArtStyle"]["valueString"] == ""
+    assert dm_keys["customTextStyle"]["valueString"] == ""
+    assert json.loads(dm_keys["artStyleSelections"]["valueString"]) == [
+        comps["art-picker"]["MultipleChoice"]["options"][0]["value"]
+    ]
+    assert json.loads(dm_keys["textStyleSelections"]["valueString"]) == [
+        comps["text-picker"]["MultipleChoice"]["options"][0]["value"]
+    ]
+    assert dm_keys["ageSelections"]["valueString"] == '["8-10"]'
+    assert dm_keys["pageCountSelections"]["valueString"] == '["16"]'
 
     parts = wrap_a2ui_parts(envelopes)
     assert len(parts) == 3
@@ -183,34 +206,33 @@ def test_message_stream_brainstorming_and_buttons_without_starting_actor():
         mock_start_actor.assert_not_called()
 
         frames = _parse_sse_frames(stream_resp.text)
-        assert len(frames) == 5
+        assert len(frames) == 3
         # Frame 0: submitted (final: False)
         assert frames[0]["result"]["kind"] == "status-update"
         assert frames[0]["result"]["status"]["state"] == "submitted"
         assert frames[0]["result"]["final"] is False
-        # Frame 1: working (final: False)
+        # Frame 1: working with parts [text, surfaceUpdate, dataModelUpdate, beginRendering]
         assert frames[1]["result"]["status"]["state"] == "working"
         assert frames[1]["result"]["final"] is False
-        # Frame 2: working with parts [text, beginRendering, surfaceUpdate, dataModelUpdate]
-        working_parts = frames[2]["result"]["status"]["message"]["parts"]
+        working_parts = frames[1]["result"]["status"]["message"]["parts"]
         a2ui_parts = _extract_a2ui_parts(working_parts)
         assert len(a2ui_parts) == 3
-        assert "beginRendering" in a2ui_parts[0]["data"]
-        assert "surfaceUpdate" in a2ui_parts[1]["data"]
-        assert "dataModelUpdate" in a2ui_parts[2]["data"]
+        assert "surfaceUpdate" in a2ui_parts[0]["data"]
+        assert "dataModelUpdate" in a2ui_parts[1]["data"]
+        assert "beginRendering" in a2ui_parts[2]["data"]
+        turn1_surface_id = a2ui_parts[2]["data"]["beginRendering"]["surfaceId"]
+        assert turn1_surface_id.startswith("storybook-studio-")
         dm_contents = {
-            item["key"]: item for item in a2ui_parts[2]["data"]["dataModelUpdate"]["contents"]
+            item["key"]: item for item in a2ui_parts[1]["data"]["dataModelUpdate"]["contents"]
         }
         assert dm_contents["title"]["valueString"] == "Demons"
         assert "Dostoevsky" in dm_contents["author"]["valueString"]
-        # Frame 3: artifact-update (lastChunk: True)
-        assert frames[3]["result"]["kind"] == "artifact-update"
-        assert frames[3]["result"]["lastChunk"] is True
-        assert len(_extract_a2ui_parts(frames[3]["result"]["artifact"]["parts"])) == 3
-        # Frame 4: completed (final: True)
-        assert frames[4]["result"]["kind"] == "status-update"
-        assert frames[4]["result"]["status"]["state"] == "completed"
-        assert frames[4]["result"]["final"] is True
+        # Frame 2: completed (final: True) with NO duplicate message or artifact-update
+        assert not any(f["result"].get("kind") == "artifact-update" for f in frames)
+        assert frames[2]["result"]["kind"] == "status-update"
+        assert frames[2]["result"]["status"]["state"] == "completed"
+        assert frames[2]["result"]["final"] is True
+        assert "message" not in frames[2]["result"]["status"]
 
         # 2. Follow-up refinement in the same contextId (adjusting age band to 10-12)
         refine_resp = client.post(
@@ -236,17 +258,21 @@ def test_message_stream_brainstorming_and_buttons_without_starting_actor():
         assert refine_resp.status_code == 200
         mock_start_actor.assert_not_called()
         refine_frames = _parse_sse_frames(refine_resp.text)
+        assert len(refine_frames) == 3
         assert refine_frames[-1]["result"]["final"] is True
+        assert "message" not in refine_frames[-1]["result"]["status"]
         refine_a2ui = _extract_a2ui_parts(
-            refine_frames[-1]["result"]["status"]["message"]["parts"]
+            refine_frames[1]["result"]["status"]["message"]["parts"]
         )
+        turn2_surface_id = refine_a2ui[2]["data"]["beginRendering"]["surfaceId"]
+        assert turn2_surface_id != turn1_surface_id
         refine_dm = {
             item["key"]: item
-            for item in refine_a2ui[2]["data"]["dataModelUpdate"]["contents"]
+            for item in refine_a2ui[1]["data"]["dataModelUpdate"]["contents"]
         }
         assert refine_dm["title"]["valueString"] == "Demons"
-        assert refine_dm["ageSelections"]["valueMap"][0]["valueString"] == "10-12"
-        assert refine_dm["pageCountSelections"]["valueMap"][0]["valueString"] == "16"
+        assert refine_dm["ageSelections"]["valueString"] == '["10-12"]'
+        assert refine_dm["pageCountSelections"]["valueString"] == '["16"]'
 
         # 3. Clicking 'shuffle_styles' button on message/stream
         shuffle_resp = client.post(
@@ -323,13 +349,15 @@ def test_message_stream_brainstorming_and_buttons_without_starting_actor():
         assert lucky_resp.status_code == 200
         mock_start_actor.assert_not_called()
         lucky_frames = _parse_sse_frames(lucky_resp.text)
+        assert len(lucky_frames) == 3
         assert lucky_frames[-1]["result"]["final"] is True
+        assert "message" not in lucky_frames[-1]["result"]["status"]
         lucky_a2ui = _extract_a2ui_parts(
-            lucky_frames[-1]["result"]["status"]["message"]["parts"]
+            lucky_frames[1]["result"]["status"]["message"]["parts"]
         )
         lucky_dm = {
             item["key"]: item
-            for item in lucky_a2ui[2]["data"]["dataModelUpdate"]["contents"]
+            for item in lucky_a2ui[1]["data"]["dataModelUpdate"]["contents"]
         }
         assert lucky_dm["title"]["valueString"] == "The Wind in the Willows"
 
@@ -438,14 +466,15 @@ async def test_generate_storybook_streams_spreads_and_pdf_download():
                 "https://pushkin-agent.duckdns.org/a2a/sessions/sess_demons/images/spread_2.png"
                 in all_raw
             )
-            # Verify final markdown link + PDF URL in completed frame
-            final_parts = frames[-1]["result"]["status"]["message"]["parts"]
+            # Verify final markdown link + PDF URL in the working frame right before completed
+            assert "message" not in frames[-1]["result"]["status"]
+            assert not any(f["result"].get("kind") == "artifact-update" for f in frames)
+            final_parts = frames[-2]["result"]["status"]["message"]["parts"]
             assert (
                 "[📥 Download Completed Storybook PDF](https://pushkin-agent.duckdns.org/a2a/sessions/sess_demons/pdf)"  # noqa: E501
                 in final_parts[0]["text"]
             )
-            # Verify artifact-update frame was also emitted before completion
-            assert any(f["result"].get("kind") == "artifact-update" for f in frames)
+            assert "Live Activity Breadcrumbs" not in all_raw
     finally:
         SESSION_A2UI_QUEUES.pop("sess_demons", None)
 
@@ -597,10 +626,107 @@ async def test_stream_session_a2ui_events_realtime_breadcrumbs_and_spread_00_img
     assert "Creating Character Bible & reference sheet" in combined
     assert "check_status" in combined
 
+    assert "Live Activity Breadcrumbs:" not in combined
     parsed = _parse_sse_frames(combined)
     assert parsed[0]["result"]["status"]["state"] == "submitted"
     assert parsed[-1]["result"]["status"]["state"] == "completed"
     assert parsed[-1]["result"]["final"] is True
+    assert "message" not in parsed[-1]["result"]["status"]
+    for f in parsed:
+        msg = f["result"].get("status", {}).get("message")
+        if msg and f["result"]["status"].get("state") == "working":
+            txt = msg["parts"][0].get("text", "")
+            if "is complete!" not in txt:
+                assert "\n" not in txt
+
+
+def test_user_edited_fields_override_prior_studio_state_on_generate():
+    """Verify user-edited title, author, custom_instructions, custom_art_style, and custom_text_style override prior studio state."""  # noqa: E501
+    client = TestClient(app)
+    _studio_contexts.clear()
+    _studio_contexts["ctx-override-1"] = {
+        "title": "Demons",
+        "author": "Fyodor Dostoevsky",
+        "selected_art_style": "Original preset art style",
+        "selected_text_style": "Original preset text style",
+        "recommended_age": "6-8",
+        "recommended_pages": "12",
+        "suggested_motif": "Original motif",
+    }
+
+    with (
+        patch("storybook.a2a.router.ate.create_actor", new_callable=AsyncMock),
+        patch("storybook.a2a.router.gcs.save_pipeline_state"),
+        patch("storybook.a2a.router.gcs.save_progress_events"),
+    ):
+        resp = client.post(
+            "/a2a",
+            json={
+                "jsonrpc": "2.0",
+                "id": "gen-override-1",
+                "method": "message/send",
+                "params": {
+                    "sessionId": "sess_override_1",
+                    "contextId": "ctx-override-1",
+                    "message": {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "kind": "data",
+                                "data": {
+                                    "action": {
+                                        "name": "generate_storybook",
+                                        "context": [
+                                            {"key": "title", "value": "Crime and Punishment"},
+                                            {"key": "author", "value": "F. M. Dostoevsky"},
+                                            {
+                                                "key": "art_style",
+                                                "value": '["Original preset art style"]',
+                                            },
+                                            {
+                                                "key": "custom_art_style",
+                                                "value": (
+                                                    "Custom St. Petersburg charcoal & gold leaf"
+                                                ),
+                                            },
+                                            {
+                                                "key": "text_style",
+                                                "value": '["Original preset text style"]',
+                                            },
+                                            {
+                                                "key": "custom_text_style",
+                                                "value": "Custom detective fable narration",
+                                            },
+                                            {"key": "age_range", "value": '["10-12"]'},
+                                            {"key": "page_count", "value": '["24"]'},
+                                            {
+                                                "key": "custom_instructions",
+                                                "value": (
+                                                    "Yellow wallpaper & pawnbroker watch motif"
+                                                ),
+                                            },
+                                        ],
+                                    }
+                                },
+                            }
+                        ],
+                    },
+                },
+            },
+        )
+        assert resp.status_code == 200
+        from storybook.a2a.router import _a2a_sessions
+
+        st = _a2a_sessions["sess_override_1"]
+        assert st.config.source.title == "Crime and Punishment"
+        assert st.config.source.author == "F. M. Dostoevsky"
+        assert st.config.image_spec == "Custom St. Petersburg charcoal & gold leaf"
+        assert st.config.text_spec == "Custom detective fable narration"
+        assert st.config.target_age == "10-12"
+        assert st.config.page_count == 24
+        assert st.config.custom_instructions == "Yellow wallpaper & pawnbroker watch motif"
+        assert _studio_contexts["ctx-override-1"]["title"] == "Crime and Punishment"
+        assert _studio_contexts["ctx-override-1"]["author"] == "F. M. Dostoevsky"
 
 
 @pytest.mark.asyncio

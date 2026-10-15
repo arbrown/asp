@@ -271,7 +271,7 @@ class A2UIEventSink:
 
     @property
     def recent_breadcrumbs(self) -> list[str]:
-        return self.breadcrumbs[-6:]
+        return self.breadcrumbs[-1:]
 
     def _record_breadcrumb(self, ev: dict[str, Any]) -> str:
         line = format_breadcrumb_line(ev, default_pct=self.last_pct)
@@ -280,11 +280,10 @@ class A2UIEventSink:
         return line
 
     def format_status_text(self, headline: str, elapsed_seconds: float | None = None) -> str:
-        trail = "\n".join(self.recent_breadcrumbs)
-        elapsed_line = (
-            f"\n⏱️ Elapsed: {int(elapsed_seconds)}s" if elapsed_seconds is not None else ""
-        )
-        return f"{headline}{elapsed_line}\n\n**Live Activity Breadcrumbs:**\n{trail}"
+        base = (headline or (self.breadcrumbs[-1] if self.breadcrumbs else "")).strip()
+        if elapsed_seconds is not None:
+            return f"{base} (⏱️ {int(elapsed_seconds)}s)"
+        return base
 
     async def ensure_initialized(self) -> None:
         if self._initialized:
@@ -306,7 +305,7 @@ class A2UIEventSink:
                 state="working",
                 final=False,
                 text=self.format_status_text(
-                    f"⏳ Starting storybook pipeline for **{self.title}** on GKE (5%)..."
+                    self.breadcrumbs[-1] if self.breadcrumbs else "✅ [5%] Initializing session"
                 ),
                 envelopes=init_envelopes,
             )
@@ -352,16 +351,23 @@ class A2UIEventSink:
                 breadcrumbs=self.recent_breadcrumbs,
                 session_id=self.session_id,
             )
+            err_text = f"❌ Storybook pipeline failed: {message or 'Unknown error'}"
+            await self.queue.put(
+                make_task_status_event(
+                    task_id=self.session_id,
+                    context_id=self.context_id,
+                    state="working",
+                    final=False,
+                    text=err_text,
+                    envelopes=envelopes,
+                )
+            )
             await self.queue.put(
                 make_task_status_event(
                     task_id=self.session_id,
                     context_id=self.context_id,
                     state="failed",
                     final=True,
-                    text=self.format_status_text(
-                        f"❌ Storybook pipeline failed: {message or 'Unknown error'}"
-                    ),
-                    envelopes=envelopes,
                 )
             )
             self._closed = True
@@ -389,8 +395,6 @@ class A2UIEventSink:
                 f"🎉 Your storybook **{self.title}**"
                 + (f" by **{self.author}**" if self.author else "")
                 + f" is complete!\n\n[📥 Download Completed Storybook PDF]({pdf_url})"
-                + "\n\n**Live Activity Breadcrumbs:**\n"
-                + "\n".join(self.recent_breadcrumbs)
             )
             await self.queue.put(
                 make_task_status_event(
@@ -403,24 +407,11 @@ class A2UIEventSink:
                 )
             )
             await self.queue.put(
-                make_task_artifact_event(
-                    task_id=self.session_id,
-                    context_id=self.context_id,
-                    text=done_text,
-                    envelopes=envelopes,
-                    artifact_id=f"storybook-pdf-{self.session_id}",
-                    name=f"Storybook: {self.title}",
-                    last_chunk=True,
-                )
-            )
-            await self.queue.put(
                 make_task_status_event(
                     task_id=self.session_id,
                     context_id=self.context_id,
                     state="completed",
                     final=True,
-                    text=done_text,
-                    envelopes=envelopes,
                 )
             )
             self._closed = True
@@ -512,6 +503,7 @@ class A2UIEventSink:
                 breadcrumbs=self.recent_breadcrumbs,
                 session_id=self.session_id,
             )
+            one_line_caption = " ".join(str(caption).split())
             await self.queue.put(
                 make_task_status_event(
                     task_id=self.session_id,
@@ -519,7 +511,7 @@ class A2UIEventSink:
                     state="working",
                     final=False,
                     text=self.format_status_text(
-                        f"🎨 [{int(self.last_pct)}%] Illustrated {sp_title}: {caption}"
+                        f"🎨 [{int(self.last_pct)}%] Illustrated {sp_title}: {one_line_caption}"
                     ),
                     envelopes=envelopes,
                 )
@@ -610,7 +602,7 @@ async def stream_session_a2ui_events(
                     context_id=ctx_id,
                     state="working",
                     final=False,
-                    text=f"⏳ Working on **{title}**...\n⏱️ Elapsed: {elapsed_s}s",
+                    text=f"⏳ Working on **{title}** (⏱️ {elapsed_s}s)",
                 )
                 yield format_jsonrpc_sse(rpc_id, hb_ev)
                 continue
@@ -771,7 +763,7 @@ async def stream_session_a2ui_events(
                     surface_id=sink.surface_id,
                     stage=sink.last_stage,
                     status="in_progress",
-                    detail=f"{sink.last_detail} (⏱️ {int(total_elapsed)}s elapsed)",
+                    detail=f"{sink.last_detail} (⏱️ {int(total_elapsed)}s)",
                     pct=sink.last_pct,
                     title=sink.title,
                     author=sink.author,
@@ -780,7 +772,9 @@ async def stream_session_a2ui_events(
                     session_id=session_id,
                 )
                 hb_headline = (
-                    f"⏳ [{int(sink.last_pct)}%] {stage_label}: {sink.last_detail}"
+                    sink.breadcrumbs[-1]
+                    if sink.breadcrumbs
+                    else f"⏳ [{int(sink.last_pct)}%] {stage_label}: {sink.last_detail}"
                 )
                 hb_event = make_task_status_event(
                     task_id=session_id,
