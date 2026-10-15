@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import PurePosixPath
 
 from google.cloud import storage
@@ -15,6 +17,17 @@ def _bucket() -> storage.Bucket:
     if _client is None:
         _client = storage.Client(project=settings.gcp_project_id)
     return _client.bucket(settings.gcs_artifacts_bucket)
+
+
+def _candidate_blob_paths(session_id: str, *parts: str) -> list[str]:
+    """Return user-scoped and legacy blob paths for cross-branch runner compatibility."""
+    default_email = (os.environ.get("DEV_DEFAULT_EMAIL") or "drewbr@google.com").strip().lower()
+    safe_user = re.sub(r"[^a-z0-9._-]", "_", default_email.replace("@", "_at_"))
+    return [
+        str(PurePosixPath("users", safe_user, "sessions", session_id, *parts)),
+        str(PurePosixPath("sessions", session_id, *parts)),
+        str(PurePosixPath("users", "legacy_at_storybook.local", "sessions", session_id, *parts)),
+    ]
 
 
 def _blob_path(session_id: str, *parts: str) -> str:
@@ -46,13 +59,29 @@ def write_bytes(session_id: str, *path_parts: str, data: bytes, content_type: st
 
 
 def read_text(session_id: str, *path_parts: str) -> str:
-    key = _blob_path(session_id, *path_parts)
-    return _bucket().blob(key).download_as_text()
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            return bucket.blob(key).download_as_text()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return bucket.blob(_blob_path(session_id, *path_parts)).download_as_text()
 
 
 def read_bytes(session_id: str, *path_parts: str) -> bytes:
-    key = _blob_path(session_id, *path_parts)
-    return _bucket().blob(key).download_as_bytes()
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            return bucket.blob(key).download_as_bytes()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return bucket.blob(_blob_path(session_id, *path_parts)).download_as_bytes()
 
 
 def save_session_meta(session_id: str, data: dict) -> None:
@@ -93,18 +122,28 @@ def save_pipeline_state(session_id: str, state: object) -> str:
 
 
 def load_pipeline_state(session_id: str):
-    """Load PipelineState from sessions/{id}/state.json, falling back to session.json."""
+    """Load PipelineState from candidate user-scoped or legacy state.json / session.json paths."""
     from storybook.models import PipelineState
 
-    try:
-        raw = json.loads(read_text(session_id, "state.json"))
-        return PipelineState.model_validate(raw)
-    except Exception:
-        try:
-            raw = json.loads(read_text(session_id, "session.json"))
-            return PipelineState.model_validate(raw)
-        except Exception:
-            return None
+    bucket = _bucket()
+    best_state = None
+    for fname in ("state.json", "session.json"):
+        for key in _candidate_blob_paths(session_id, fname):
+            try:
+                raw = json.loads(bucket.blob(key).download_as_text())
+                st = PipelineState.model_validate(raw)
+                if best_state is None:
+                    best_state = st
+                elif st.current_stage in ("done", "error") and best_state.current_stage not in (
+                    "done",
+                    "error",
+                ):
+                    best_state = st
+                elif (st.progress_pct or 0) > (best_state.progress_pct or 0):
+                    best_state = st
+            except Exception:
+                continue
+    return best_state
 
 
 def save_progress_events(session_id: str, events: list[dict], done: bool = False) -> str:
@@ -117,16 +156,27 @@ def save_progress_events(session_id: str, events: list[dict], done: bool = False
 
 
 def load_progress_events(session_id: str) -> tuple[list[dict], bool]:
-    """Load (events, done) from sessions/{id}/events.json."""
-    try:
-        raw = json.loads(read_text(session_id, "events.json"))
-        if isinstance(raw, dict):
-            return list(raw.get("events", [])), bool(raw.get("done", False))
-        if isinstance(raw, list):
-            return raw, False
-    except Exception:
-        pass
-    return [], False
+    """Load (events, done) across candidate user-scoped and legacy events.json paths."""
+    bucket = _bucket()
+    best_events: list[dict] = []
+    best_done = False
+    for key in _candidate_blob_paths(session_id, "events.json"):
+        try:
+            raw = json.loads(bucket.blob(key).download_as_text())
+            evs: list[dict] = []
+            done = False
+            if isinstance(raw, dict):
+                evs = list(raw.get("events", []))
+                done = bool(raw.get("done", False))
+            elif isinstance(raw, list):
+                evs = raw
+            if done and not best_done:
+                best_events, best_done = evs, done
+            elif len(evs) > len(best_events):
+                best_events, best_done = evs, (best_done or done)
+        except Exception:
+            continue
+    return best_events, best_done
 
 
 def load_all_session_meta() -> list[dict]:
@@ -144,8 +194,20 @@ def load_all_session_meta() -> list[dict]:
 
 def read_blob(session_id: str, *path_parts: str) -> tuple[bytes, str]:
     """Return (bytes, content_type) for a GCS object."""
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            blob = bucket.blob(key)
+            blob.reload()
+            data = blob.download_as_bytes()
+            return data, blob.content_type or "application/octet-stream"
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
     key = _blob_path(session_id, *path_parts)
-    blob = _bucket().blob(key)
+    blob = bucket.blob(key)
     blob.reload()
     data = blob.download_as_bytes()
     return data, blob.content_type or "application/octet-stream"
@@ -260,15 +322,16 @@ def load_pdf(session_id: str, filename: str = "storybook.pdf") -> bytes | None:
 
 
 def list_session_images(session_id: str) -> list[str]:
-    """List generated spread/page image filenames stored under sessions/{session_id}/images/."""
+    """List generated spread/page image filenames across user-scoped and legacy paths."""
     try:
-        prefix = f"sessions/{session_id}/images/"
-        blobs = _bucket().list_blobs(prefix=prefix)
-        names = [
-            b.name[len(prefix) :]
-            for b in blobs
-            if b.name.endswith(".png") and not b.name[len(prefix) :].startswith("ref_")
-        ]
-        return sorted(names)
+        bucket = _bucket()
+        found: set[str] = set()
+        for base in _candidate_blob_paths(session_id, "images"):
+            prefix = base.rstrip("/") + "/"
+            for b in bucket.list_blobs(prefix=prefix):
+                rel = b.name[len(prefix) :]
+                if rel.endswith(".png") and not rel.startswith("ref_"):
+                    found.add(rel)
+        return sorted(found)
     except Exception:
         return []
