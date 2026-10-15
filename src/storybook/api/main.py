@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from storybook.a2a.router import a2a_router
 from storybook.api.routes import router
 from storybook.config import settings
 from storybook.db import store
@@ -27,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(a2a_router)
 
 
 async def _load_from_gcs_and_backfill() -> int:
