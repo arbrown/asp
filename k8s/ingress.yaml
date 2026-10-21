@@ -13,6 +13,20 @@ spec:
   rules:
     - http:
         paths:
+          - path: /a2a
+            pathType: Prefix
+            backend:
+              service:
+                name: storybook-a2a
+                port:
+                  number: 80
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: storybook-a2a
+                port:
+                  number: 80
           - path: /api
             pathType: Prefix
             backend:

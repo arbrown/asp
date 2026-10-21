@@ -21,6 +21,7 @@ AGE_PARAMS: dict[str, dict] = {
     "10-12": {"max_words_per_page": 110, "reading_level": "Grade 4-6"},
     # Legacy keys retained so older sessions resume cleanly
     "6-8":   {"max_words_per_page": 50,  "reading_level": "Grade 1-2 (legacy)"},
+    "8-10":  {"max_words_per_page": 70,  "reading_level": "Grade 2-4"},
     "9-12":  {"max_words_per_page": 100, "reading_level": "Grade 3-5 (legacy)"},
 }
 

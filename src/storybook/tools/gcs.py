@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 from datetime import timedelta
 from pathlib import PurePosixPath
 
@@ -69,6 +70,18 @@ def _validate_path_segments(session_id: str, parts: tuple[str, ...]) -> None:
         for seg in part.split("/"):
             if seg in ("..", "."):
                 raise ValueError(f"Path traversal detected in GCS blob path: {part!r}")
+
+
+def _candidate_blob_paths(session_id: str, *parts: str) -> list[str]:
+    """Return user-scoped and legacy blob paths for cross-branch runner compatibility."""
+    _validate_path_segments(session_id, parts)
+    default_email = (os.environ.get("DEV_DEFAULT_EMAIL") or "drewbr@google.com").strip().lower()
+    safe_user = re.sub(r"[^a-z0-9._-]", "_", default_email.replace("@", "_at_"))
+    return [
+        str(PurePosixPath("users", safe_user, "sessions", session_id, *parts)),
+        str(PurePosixPath("sessions", session_id, *parts)),
+        str(PurePosixPath("users", "legacy_at_storybook.local", "sessions", session_id, *parts)),
+    ]
 
 
 def _blob_path(
@@ -157,14 +170,27 @@ def read_text(
     *path_parts: str,
     user_email: str | None = None,
 ) -> str:
-    key = _blob_path(session_id, *path_parts, user_email=user_email)
-    try:
-        return _bucket().blob(key).download_as_text()
-    except Exception:
-        if _can_fallback_to_legacy(user_email):
-            legacy_key = _blob_path(session_id, *path_parts, user_email="")
-            return _bucket().blob(legacy_key).download_as_text()
-        raise
+    effective_user = _scoped_user_email if user_email is None else user_email
+    if effective_user is not None:
+        key = _blob_path(session_id, *path_parts, user_email=user_email)
+        try:
+            return _bucket().blob(key).download_as_text()
+        except Exception:
+            if _can_fallback_to_legacy(user_email):
+                legacy_key = _blob_path(session_id, *path_parts, user_email="")
+                return _bucket().blob(legacy_key).download_as_text()
+            raise
+
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            return bucket.blob(key).download_as_text()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return bucket.blob(_blob_path(session_id, *path_parts)).download_as_text()
 
 
 def read_bytes(
@@ -172,14 +198,27 @@ def read_bytes(
     *path_parts: str,
     user_email: str | None = None,
 ) -> bytes:
-    key = _blob_path(session_id, *path_parts, user_email=user_email)
-    try:
-        return _bucket().blob(key).download_as_bytes()
-    except Exception:
-        if _can_fallback_to_legacy(user_email):
-            legacy_key = _blob_path(session_id, *path_parts, user_email="")
-            return _bucket().blob(legacy_key).download_as_bytes()
-        raise
+    effective_user = _scoped_user_email if user_email is None else user_email
+    if effective_user is not None:
+        key = _blob_path(session_id, *path_parts, user_email=user_email)
+        try:
+            return _bucket().blob(key).download_as_bytes()
+        except Exception:
+            if _can_fallback_to_legacy(user_email):
+                legacy_key = _blob_path(session_id, *path_parts, user_email="")
+                return _bucket().blob(legacy_key).download_as_bytes()
+            raise
+
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            return bucket.blob(key).download_as_bytes()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return bucket.blob(_blob_path(session_id, *path_parts)).download_as_bytes()
 
 
 def save_session_meta(
@@ -200,10 +239,7 @@ def save_pipeline_state(
     from storybook.models import PipelineState
 
     if isinstance(state, PipelineState):
-        payload = state.model_dump(mode="json")
-        # Keep source_text in original/source_text.txt once adapted to keep state.json compact
-        if payload.get("spread_contents") and len(payload.get("source_text") or "") > 20000:
-            payload["source_text"] = ""
+        payload = state.model_dump()
     elif isinstance(state, dict):
         payload = state
     else:
@@ -224,11 +260,10 @@ def save_pipeline_state(
         "config": payload.get("config", {}),
         "current_stage": payload.get("current_stage", "initializing"),
         "progress_pct": payload.get("progress_pct", 0),
-        "pdf_gcs_uri": payload.get("pdf_gcs_uri", ""),
-        "wide_pdf_gcs_uri": payload.get("wide_pdf_gcs_uri", ""),
-        "trace_url": payload.get("trace_url", ""),
         "errors": payload.get("errors", []),
-        "started_at": payload.get("started_at"),
+        "final_pdf_uri": payload.get("final_pdf_uri"),
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
         "finished_at": payload.get("finished_at"),
         "adapted_from_source": payload.get("adapted_from_source", True),
     }
@@ -243,15 +278,35 @@ def load_pipeline_state(
     """Load PipelineState from state.json, falling back to session.json."""
     from storybook.models import PipelineState
 
-    try:
-        raw = json.loads(read_text(session_id, "state.json", user_email=user_email))
-        return PipelineState.model_validate(raw)
-    except Exception:
+    effective_user = _scoped_user_email if user_email is None else user_email
+    if effective_user is not None:
         try:
-            raw = json.loads(read_text(session_id, "session.json", user_email=user_email))
+            raw = json.loads(read_text(session_id, "state.json", user_email=user_email))
             return PipelineState.model_validate(raw)
         except Exception:
-            return None
+            try:
+                raw = json.loads(read_text(session_id, "session.json", user_email=user_email))
+                return PipelineState.model_validate(raw)
+            except Exception:
+                return None
+
+    bucket = _bucket()
+    best_state: PipelineState | None = None
+    for filename in ("state.json", "session.json"):
+        for key in _candidate_blob_paths(session_id, filename):
+            try:
+                raw = json.loads(bucket.blob(key).download_as_text())
+                st = PipelineState.model_validate(raw)
+                if best_state is None or st.progress_pct > best_state.progress_pct:
+                    best_state = st
+                elif st.current_stage in ("done", "error") and best_state.current_stage not in (
+                    "done",
+                    "error",
+                ):
+                    best_state = st
+            except Exception:
+                continue
+    return best_state
 
 
 def save_progress_events(
@@ -274,15 +329,38 @@ def load_progress_events(
     user_email: str | None = None,
 ) -> tuple[list[dict], bool]:
     """Load (events, done) from events.json."""
-    try:
-        raw = json.loads(read_text(session_id, "events.json", user_email=user_email))
-        if isinstance(raw, dict):
-            return list(raw.get("events", [])), bool(raw.get("done", False))
-        if isinstance(raw, list):
-            return raw, False
-    except Exception:
-        pass
-    return [], False
+    effective_user = _scoped_user_email if user_email is None else user_email
+    if effective_user is not None:
+        try:
+            raw = json.loads(read_text(session_id, "events.json", user_email=user_email))
+            if isinstance(raw, dict):
+                return list(raw.get("events", [])), bool(raw.get("done", False))
+            if isinstance(raw, list):
+                return list(raw), False
+        except Exception:
+            pass
+        return [], False
+
+    bucket = _bucket()
+    best_events: list[dict] = []
+    best_done = False
+    for key in _candidate_blob_paths(session_id, "events.json"):
+        try:
+            raw = json.loads(bucket.blob(key).download_as_text())
+            if isinstance(raw, dict):
+                evs = list(raw.get("events", []))
+                dn = bool(raw.get("done", False))
+            elif isinstance(raw, list):
+                evs = list(raw)
+                dn = False
+            else:
+                continue
+            if len(evs) > len(best_events) or (dn and not best_done):
+                best_events = evs
+                best_done = dn
+        except Exception:
+            continue
+    return best_events, best_done
 
 
 def load_all_session_meta(user_email: str | None = None) -> list[dict]:
@@ -321,20 +399,38 @@ def read_blob(
     user_email: str | None = None,
 ) -> tuple[bytes, str]:
     """Return (bytes, content_type) for a GCS object."""
-    key = _blob_path(session_id, *path_parts, user_email=user_email)
-    try:
-        blob = _bucket().blob(key)
-        blob.reload()
-        data = blob.download_as_bytes()
-        return data, blob.content_type or "application/octet-stream"
-    except Exception:
-        if _can_fallback_to_legacy(user_email):
-            legacy_key = _blob_path(session_id, *path_parts, user_email="")
-            blob = _bucket().blob(legacy_key)
+    effective_user = _scoped_user_email if user_email is None else user_email
+    if effective_user is not None:
+        key = _blob_path(session_id, *path_parts, user_email=user_email)
+        try:
+            blob = _bucket().blob(key)
             blob.reload()
             data = blob.download_as_bytes()
             return data, blob.content_type or "application/octet-stream"
-        raise
+        except Exception:
+            if _can_fallback_to_legacy(user_email):
+                legacy_key = _blob_path(session_id, *path_parts, user_email="")
+                blob = _bucket().blob(legacy_key)
+                blob.reload()
+                data = blob.download_as_bytes()
+                return data, blob.content_type or "application/octet-stream"
+            raise
+
+    bucket = _bucket()
+    last_exc: Exception | None = None
+    for key in _candidate_blob_paths(session_id, *path_parts):
+        try:
+            blob = bucket.blob(key)
+            blob.reload()
+            data = blob.download_as_bytes()
+            return data, blob.content_type or "application/octet-stream"
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    blob = bucket.blob(_blob_path(session_id, *path_parts))
+    blob.reload()
+    return blob.download_as_bytes(), blob.content_type or "application/octet-stream"
 
 
 def generate_signed_url(
@@ -538,20 +634,74 @@ def load_spread_contents(
     """Return list[SpreadContent] for all spreads stored as JSON in GCS."""
     from storybook.models import SpreadContent
 
+    effective_user = _scoped_user_email if user_email is None else user_email
     bucket = _bucket()
-    prefix = _blob_path(session_id, "spreads", user_email=user_email) + "/"
-    blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
-    spreads = [
-        SpreadContent(**json.loads(b.download_as_text()))
-        for b in blobs
-        if b.name.endswith(".json")
-    ]
-    if not spreads and _can_fallback_to_legacy(user_email):
-        legacy_prefix = _blob_path(session_id, "spreads", user_email="") + "/"
-        blobs = sorted(bucket.list_blobs(prefix=legacy_prefix), key=lambda b: b.name)
+    if effective_user is not None:
+        prefix = _blob_path(session_id, "spreads", user_email=user_email) + "/"
+        blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
         spreads = [
             SpreadContent(**json.loads(b.download_as_text()))
             for b in blobs
             if b.name.endswith(".json")
         ]
-    return spreads
+        if not spreads and _can_fallback_to_legacy(user_email):
+            legacy_prefix = _blob_path(session_id, "spreads", user_email="") + "/"
+            blobs = sorted(bucket.list_blobs(prefix=legacy_prefix), key=lambda b: b.name)
+            spreads = [
+                SpreadContent(**json.loads(b.download_as_text()))
+                for b in blobs
+                if b.name.endswith(".json")
+            ]
+        return spreads
+
+    for base in _candidate_blob_paths(session_id, "spreads"):
+        prefix = base + "/"
+        blobs = sorted(bucket.list_blobs(prefix=prefix), key=lambda b: b.name)
+        items = [
+            SpreadContent(**json.loads(b.download_as_text()))
+            for b in blobs
+            if b.name.endswith(".json")
+        ]
+        if items:
+            return items
+    return []
+
+
+def load_image(
+    session_id: str,
+    filename: str,
+    user_email: str | None = None,
+) -> bytes | None:
+    """Load image bytes from sessions/{id}/images/{filename}, or None if missing."""
+    try:
+        return read_bytes(session_id, "images", filename, user_email=user_email)
+    except Exception:
+        return None
+
+
+def load_pdf(
+    session_id: str,
+    filename: str = "storybook.pdf",
+    user_email: str | None = None,
+) -> bytes | None:
+    """Load PDF bytes from sessions/{id}/final/{filename}, or None if missing."""
+    try:
+        return read_bytes(session_id, "final", filename, user_email=user_email)
+    except Exception:
+        return None
+
+
+def list_session_images(session_id: str) -> list[str]:
+    """List generated spread/page image filenames across user-scoped and legacy paths."""
+    try:
+        bucket = _bucket()
+        found: set[str] = set()
+        for base in _candidate_blob_paths(session_id, "images"):
+            prefix = base.rstrip("/") + "/"
+            for b in bucket.list_blobs(prefix=prefix):
+                rel = b.name[len(prefix) :]
+                if rel.endswith(".png") and not rel.startswith("ref_"):
+                    found.add(rel)
+        return sorted(found)
+    except Exception:
+        return []

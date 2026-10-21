@@ -1,0 +1,122 @@
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: storybook-a2a-backend-config
+  namespace: default
+spec:
+  timeoutSec: 3600
+  iap:
+    enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storybook-a2a
+  namespace: default
+  labels:
+    app: storybook-a2a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storybook-a2a
+  template:
+    metadata:
+      labels:
+        app: storybook-a2a
+    spec:
+      serviceAccountName: storybook-backend
+      containers:
+        - name: backend
+          image: us-central1-docker.pkg.dev/drewbr-sandbox-86/storybook-images/backend:a2a-a2ui
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GCP_PROJECT_ID
+              value: "drewbr-sandbox-86"
+            - name: GCP_REGION
+              value: "us-central1"
+            - name: GCS_ARTIFACTS_BUCKET
+              value: "storybook-artifacts-8199187a"
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "1"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "drewbr-sandbox-86"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "global"
+            - name: RQLITE_URL
+              value: "http://rqlite.default.svc.cluster.local:4001"
+            - name: SUBSTRATE_ENABLED
+              value: "true"
+            - name: SUBSTRATE_API_ADDR
+              value: "api.ate-system.svc:443"
+            - name: SUBSTRATE_ATESPACE
+              value: "asp"
+            - name: SUBSTRATE_TEMPLATE
+              value: "asp-runner"
+            - name: SUBSTRATE_CA_FILE
+              value: "/run/servicedns-ca/ca.crt"
+            - name: SUBSTRATE_CRED_BUNDLE
+              value: "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+            - name: DEV_AUTH_ENABLED
+              value: "0"
+            - name: DEV_DEFAULT_EMAIL
+              value: "drewbr@google.com"
+          volumeMounts:
+            - name: servicedns-ca
+              mountPath: /run/servicedns-ca
+              readOnly: true
+            - name: podidentity
+              mountPath: /run/podidentity.podcert.ate.dev
+              readOnly: true
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.crt
+        - name: podidentity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storybook-a2a
+  namespace: default
+  annotations:
+    cloud.google.com/backend-config: '{"default": "storybook-a2a-backend-config"}'
+spec:
+  selector:
+    app: storybook-a2a
+  ports:
+    - port: 80
+      targetPort: 8080
