@@ -79,16 +79,34 @@ export default function HistoryPage() {
       {isLoading && <p className="text-sepia-600">Loading…</p>}
 
       {!isLoading && sessions.length === 0 && (
-        <div className="text-center py-20 text-sepia-600">
-          <p className="text-xl mb-4">
+        <div className="border border-sepia-200 rounded-2xl bg-white p-10 text-center shadow-sm">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-sepia-50 border border-sepia-200 flex items-center justify-center text-sepia-700">
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+              />
+            </svg>
+          </div>
+          <h2 className="text-xl font-serif font-semibold text-sepia-900 mb-2">
             {filter === "done"
-              ? "No completed storybooks yet."
+              ? "Welcome to Your Personal Storybook Library"
               : filter === "error"
-              ? "No failed runs."
-              : "No storybooks yet."}
+              ? "No Failed Runs"
+              : "No Storybooks Yet"}
+          </h2>
+          <p className="text-sm text-sepia-600 max-w-md mx-auto mb-6">
+            {filter === "error"
+              ? "You don't have any failed storybook runs in your workspace."
+              : "Adapt any classic work from Project Gutenberg into a custom-illustrated children's picture book, privately scoped to your account."}
           </p>
-          <button onClick={() => navigate("/new")} className="underline hover:text-sepia-900">
-            Create your first one →
+          <button
+            onClick={() => navigate("/new")}
+            className="bg-sepia-900 text-parchment px-5 py-2.5 rounded-lg hover:bg-sepia-600 transition-colors text-sm font-medium"
+          >
+            Create your first storybook →
           </button>
         </div>
       )}

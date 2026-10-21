@@ -22,6 +22,7 @@ resource "google_project_service" "apis" {
     "iamcredentials.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
+    "sts.googleapis.com",
   ])
 
   service            = each.key

@@ -128,12 +128,19 @@ class SubstrateClient:
         atespace: str,
         name: str,
         resume: bool = False,
+        user_email: str = "",
+        downscoped_token: str | None = None,
     ) -> dict:
         if not settings.substrate_enabled:
             cmd = [sys.executable, "-m", "storybook.runner", "--session-id", name]
             if resume:
                 cmd.append("--resume")
-            proc = subprocess.Popen(cmd)
+            env = os.environ.copy()
+            if user_email:
+                env["ASP_USER_EMAIL"] = user_email
+            if downscoped_token:
+                env["GCS_DOWNSCOPED_TOKEN"] = downscoped_token
+            proc = subprocess.Popen(cmd, env=env)
             self._local_procs[name] = proc
             return {"name": name, "atespace": atespace, "state": "ACTOR_STATE_RUNNING"}
 
@@ -241,14 +248,26 @@ class SubstrateClient:
         atespace: str = "asp",
         name: str = "",
         resume: bool = False,
+        user_email: str = "",
+        downscoped_token: str | None = None,
     ) -> dict:
         """Create and resume a dedicated Substrate Actor for the given session."""
+        if settings.substrate_enabled and name and (user_email or downscoped_token):
+            from storybook.db import store
+
+            try:
+                await store.save_actor_credentials(name, user_email, downscoped_token)
+            except Exception as exc:
+                log.warning("Could not persist actor credentials for %s: %s", name, exc)
+
         return await asyncio.to_thread(
             self._create_actor_sync,
             template,
             atespace,
             name,
             resume,
+            user_email,
+            downscoped_token,
         )
 
     def _stop_actor_sync(self, name: str, atespace: str) -> bool:

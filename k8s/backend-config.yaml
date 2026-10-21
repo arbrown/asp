@@ -3,5 +3,10 @@ kind: BackendConfig
 metadata:
   name: storybook-backend-config
   namespace: default
-spec: {}
+spec:
+  timeoutSec: 3600
+  iap:
+    enabled: true
+    oauthclientCredentials:
+      secretName: storybook-iap-secret
 

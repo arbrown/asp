@@ -57,6 +57,12 @@ spec:
               value: "/run/servicedns-ca/ca.crt"
             - name: SUBSTRATE_CRED_BUNDLE
               value: "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+            - name: DEV_AUTH_ENABLED
+              value: "0"
+            - name: LEGACY_OWNER_EMAIL
+              value: "${LEGACY_OWNER_EMAIL}"
+            - name: DEV_DEFAULT_EMAIL
+              value: "${DEV_DEFAULT_EMAIL}"
           volumeMounts:
             - name: servicedns-ca
               mountPath: /run/servicedns-ca
