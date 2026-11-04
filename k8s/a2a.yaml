@@ -15,6 +15,13 @@ metadata:
   namespace: default
   labels:
     app: storybook-a2a
+    registry.gke.io/functional-type: "AGENT"
+  annotations:
+    a2a-protocol.org/agent-card: |
+      card:
+        endpoint: /.well-known/agent.json
+        protocol: HTTP
+        port: 8080
 spec:
   replicas: 1
   selector:
@@ -24,6 +31,8 @@ spec:
     metadata:
       labels:
         app: storybook-a2a
+      annotations:
+        iam.gke.io/spiffe-identity-type: agent-identity
     spec:
       serviceAccountName: storybook-backend
       containers:
